@@ -1,0 +1,17 @@
+[package]
+name = "s4h"
+version = "0.1.0"
+authors = ["Greg Cowan <cowang4@gmail.com>"]
+
+[dependencies]
+blake2b_simd = "0.2.3"
+uuid = { version = "0.7.0", features = ["serde", "v4"] }
+
+
+[lib]
+name = "s4h_lib"
+path = "src/lib.rs"
+
+[[bin]]
+name = "s4h_bin"
+path = "src/bin.rs"
