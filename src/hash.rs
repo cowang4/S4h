@@ -1,24 +1,7 @@
-#![feature(plugin, never_type)]
-#![plugin(tarpc_plugins)]
-
-extern crate blake2b_simd;
-extern crate bytes;
-extern crate chashmap;
-#[macro_use]
-extern crate log;
-#[macro_use]
-extern crate serde_derive;
-#[macro_use]
-extern crate tarpc;
-extern crate uuid;
-
-pub mod key;
-pub mod peer_info;
-pub mod rpc;
 
 use bytes::Bytes;
 
-use key::{KEY_SIZE_BYTES, Key};
+use crate::key::{KEY_SIZE_BYTES, Key};
 
 pub const ALPHA: usize = 3; // concurrency parameter
 

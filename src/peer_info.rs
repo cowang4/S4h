@@ -1,22 +1,25 @@
 
 use std::collections::LinkedList;
 use std::net::SocketAddr;
+use std::sync::RwLock;
+use std::ops::{Deref, DerefMut};
 
 use bytes::Bytes;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use key::{Key, key_dist, KEY_SIZE_BITS, KEY_SIZE_BYTES};
-use rpc::{FutureClient};
+use crate::key::{Key, key_dist, KEY_SIZE_BITS, KEY_SIZE_BYTES};
+use crate::rpc::{Client};
 
 
 pub const K: usize = 20;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Peer {
     pub id: Key,
     pub addr: SocketAddr,
     #[serde(skip)]
-    pub client: Option<Box<FutureClient>>,
+    pub client: Option<Box<Client>>,
 }
 
 impl PartialEq for Peer {
@@ -142,16 +145,16 @@ impl KBucket {
 }
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct PeerInfo {
-    pub buckets: Vec<KBucket>,
+    pub buckets: Vec<RwLock<KBucket>>,
     pub id: Key,
 }
 
 impl PeerInfo {
     
     pub fn new() -> PeerInfo {
-        let vec = Vec::<KBucket>::with_capacity(KEY_SIZE_BITS);
+        let vec = Vec::<RwLock<KBucket>>::with_capacity(KEY_SIZE_BITS);
         let id = Bytes::from(&Uuid::new_v4().as_bytes()[..]);
         PeerInfo {
             buckets: vec,
@@ -160,7 +163,7 @@ impl PeerInfo {
     }
 
     pub fn with_id(k: &Key) -> PeerInfo {
-        let vec = Vec::<KBucket>::with_capacity(KEY_SIZE_BITS);
+        let vec = Vec::<RwLock<KBucket>>::with_capacity(KEY_SIZE_BITS);
         PeerInfo {
             buckets: vec,
             id: k.clone(),
@@ -188,7 +191,36 @@ impl PeerInfo {
 
     pub fn contains(&self, k: &Key) -> bool {
         let i = self.bucket_of(k);
-        self.buckets[i].contains(k)
+        self.buckets[i].read().expect("obtain kbucket read lock").deref().contains(k)
+    }
+
+    /// Updates a node_id by moving it to the end of the list
+    pub fn update(&mut self, k: &Key) {
+        let bucket_num = self.bucket_of(k);
+        let mut bucket_read = self.buckets[bucket_num].write()
+                                                 .expect("obtain kbucket write lock");
+        let bucket = bucket_read.deref_mut();
+        let index = bucket.index(k);
+        if let Some(index) = index {
+            bucket.move_to_back(index);
+        }
+    }
+
+    pub fn insert(&mut self, k: &Key, addr: SocketAddr, client: Box<Client>) {
+        let bucket_num = self.bucket_of(k);
+        let mut bucket_read = self.buckets[bucket_num].write()
+                                                 .expect("obtain kbucket write lock");
+        let bucket = bucket_read.deref_mut();
+        let index = bucket.index(k);
+        match index {
+            Some(index) => bucket.move_to_back(index),
+            None        => {
+                let mut peer = Peer::with_id(k.clone());
+                peer.addr = addr;
+                peer.client = Some(client);
+                bucket.push_back(peer);
+            }
+        }
     }
 }
 

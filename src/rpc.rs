@@ -1,18 +1,24 @@
 
+use std::sync::Arc;
 use std::ops::{Deref, DerefMut};
 
+use bincode_transport;
 use chashmap::CHashMap;
-use tarpc::util::{Never};
+use futures::{
+    future::{self, Ready},
+    prelude::*,
+};
+use log::{info};
+use tarpc::{
+    client,
+};
+use tokio;
+use tokio_executor;
+use serde::{Deserialize, Serialize};
 
-use key::Key;
-use peer_info::{Peer, PeerInfo};
+use crate::key::Key;
+use crate::peer_info::{Peer, PeerInfo};
 
-
-#[derive(Debug, Deserialize, Serialize)]
-pub enum FindValueReturned {
-    Values(Vec<String>),
-    Peers(Vec<Peer>),
-}
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct MessageReturned {
@@ -23,49 +29,83 @@ pub struct MessageReturned {
     sig: (),                    // TODO peer's signature of above data
 }
 
-service! {
-    rpc ping();
+impl MessageReturned {
+    
+    pub fn from_id(k: Key) -> MessageReturned {
+        MessageReturned {
+            from_id: k,
+            key: None,
+            vals: None,
+            peers: None,
+            sig: (),
+        }
+    }
+}
+
+tarpc::service! {
+    rpc ping(from: Peer) -> MessageReturned;
     rpc store(pair: (Key, String));
-    rpc find_node(node_id: Key) -> Vec<Peer>;
-    rpc find_value(key: Key) -> FindValueReturned;
+    rpc find_node(node_id: Key) -> MessageReturned;
+    rpc find_value(key: Key) -> MessageReturned;
 }
 
 #[derive(Clone)]
 pub struct S4hServer {
     map: CHashMap<Key, Vec<String>>,
-    peer_info: PeerInfo, // TODO add mutability
+    peer_info: PeerInfo,
 }
 
 impl S4hServer {
     
-    pub fn new() -> S4hServer {
-        S4hServer {
+    pub fn new() -> Arc<S4hServer> {
+        Arc::new(S4hServer {
             map: CHashMap::<Key, Vec<String>>::new(),
             peer_info: PeerInfo::new(),
-        }
+        })
     }
 
-    pub fn validate_and_update_peer(&self, msg: MessageReturned) -> bool {
-        // TODO check that S/Kad id generation requirement is met
+    /// Should get a peer with each request,
+    /// validate that it's either in the kbuckets, so update
+    /// or make a client to it, call ping, verify signature of response, and add it to kbuckets
+    pub fn validate_and_update_peer(&mut self, peer: Peer) -> bool {
+        // TODO check that S/Kad ID generation requirement is met
         // TODO check that signature authenticates messsage
         // TODO update kbuckets with this node
-        unimplemented!();
+        let contains = self.peer_info.contains(&peer.id);
+        if contains {
+            self.peer_info.update(&peer.id);
+        }
+        else {
+            let transport = bincode_transport::connect(&peer.addr)?;
+            let options = client::Config::default();
+            let client = tokio_executor::spawn(new_stub(options, transport)
+                                         .map_err(tarpc::Error::from)
+                                         .and_then(|client| {
+                                            self.peer_info.insert(&peer.id, peer.addr, Box::new(client));
+                                            client.ping(peer)
+                                         })
+                                         .map_err(|_| ())
+                                         .map(|_| ()));
+        }
+        return true;
     }
 }
 
-impl FutureService for S4hServer {
-    type PingFut = Result<(), Never>;
-    type StoreFut = Result<(), Never>;
-    type FindNodeFut = Result<Vec<Peer>, Never>;
-    type FindValueFut = Result<FindValueReturned, Never>;
+impl Service for Arc<S4hServer> {
+    type PingFut = Ready<MessageReturned>;
+    type StoreFut = Ready<()>;
+    type FindNodeFut = Ready<MessageReturned>;
+    type FindValueFut = Ready<MessageReturned>;
 
-    /// Ask this peer if it's alive
-    fn ping(&self) -> Self::PingFut {
+    /// Respond with a () if this peer is alive
+    fn ping(&self, from: Peer) -> Self::PingFut {
         info!("Received a ping request");
-        Ok(())
+        self.validate_and_update_peer(from); // TODO handle invalid peers
+        let response = MessageReturned::from_id(self.peer_info.id.clone());
+        future::ready(response)
     }
 
-    /// Ask this peer to store this pair in the HashTable
+    /// Store this pair in the HashTable
     /// pair: (Key, URL)
     fn store(&self, pair: (Key, String)) -> Self::StoreFut {
         info!("Received a store request");
@@ -75,7 +115,7 @@ impl FutureService for S4hServer {
         else {
             self.map.insert_new(pair.0, vec![pair.1]);
         }
-        Ok(())
+        future::ready(())
     }
 
     /// Find a node by it's ID
@@ -87,7 +127,12 @@ impl FutureService for S4hServer {
     fn find_value(&self, key: Key) -> Self::FindValueFut {
         info!("Received a find value request");
         match self.map.get(&key) {
-            Some(value) => return Ok(FindValueReturned::Values(value.deref().clone())),
+            Some(values) => {
+                let mut response = MessageReturned::from_id(self.peer_info.id.clone());
+                response.key = Some(key);
+                response.vals = Some(values.deref().clone());
+                return future::ready(response);
+            },
             None => {
                 unimplemented!();
             }
