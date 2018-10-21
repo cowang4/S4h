@@ -8,11 +8,9 @@ mod rpc;
 use std::env;
 use std::io;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
 
 use bincode_transport;
 use futures::{
-    future::{self, Ready},
     prelude::*,
 };
 use log::{error, info};
@@ -20,35 +18,34 @@ use tarpc::{
     client, context,
     server::{self, Handler, Server},
 };
-use tokio::timer::Delay;
 use tokio_executor;
 
-use crate::{hash::hash, rpc::{S4hServer, Client, new_stub, serve, Service}};
+use crate::{hash::hash, rpc::{S4hServer, new_stub, serve, Service}};
 
 
 async fn run(is_client: bool, server_addr: SocketAddr, client_addr: SocketAddr) -> io::Result<()> {
     // server init code
-    let server_transport = bincode_transport::listen(server_addr)?;
+    let server_transport = bincode_transport::listen(&server_addr)?;
     let server = Server::new(server::Config::default())
         .incoming(server_transport)
         .take(1)
         .repond_with(serve(S4hServer::new()));
 
     info!("Running server...");
-    tokio_executor::spawn(server.unit_error().boxed().compat()).expect("server future to spawn");
+    tokio_executor::spawn(server.unit_error().boxed().compat());
 
     // client init code
     let client_transport = await!(bincode_transport::connect(&client_addr))?;
-    let mut client = await!(new_stub(client::Config::default(), client_transport));
+    let mut client = await!(new_stub(client::Config::default(), client_transport))?;
 
     if is_client {
         // client test example
         let hello = "Hello, World!".as_bytes();
         let hello_hash = hash(hello);
         let hello_hash2 = hello_hash.clone();
-        let store_resp = await!(client.store(context::current(), hello_hash))?;
+        let store_resp = await!(client.store(context::current(), hello_hash, "ipfs://foobar".into()))?;
         info!("Store response: {}", store_resp);
-        let find_val_resp = await!(client.find_value(hello_hash2))?;
+        let find_val_resp = await!(client.find_value(context::current(), hello_hash2))?;
         info!("Find_val response: {}", find_val_resp);
     }
 

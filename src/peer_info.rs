@@ -5,8 +5,8 @@ use std::sync::RwLock;
 use std::ops::{Deref, DerefMut};
 
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use serde;
 
 use crate::key::{Key, key_dist, KEY_SIZE_BITS, KEY_SIZE_BYTES};
 use crate::rpc::{Client};
