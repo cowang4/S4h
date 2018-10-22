@@ -1,6 +1,7 @@
 
 use std::fmt::{self, Display, Formatter};
-use std::sync::Arc;
+use std::net::SocketAddr;
+use std::sync::{Arc};
 use std::ops::{Deref, DerefMut};
 
 use bincode_transport;
@@ -8,13 +9,13 @@ use chashmap::CHashMap;
 use futures::{
     future::{self, Ready},
     prelude::*,
+    task::{Spawn, SpawnExt},
 };
 use log::{info};
 use tarpc::{
     client,
     context,
 };
-use tokio_executor;
 use serde::{Deserialize, Serialize};
 
 use crate::key::Key;
@@ -32,7 +33,7 @@ pub struct MessageReturned {
 
 impl Display for MessageReturned {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "MessageReturned:\n\tfrom: {}\n\tkey: {}\n\tvals: {}\n\tpeers: {}\n\tsig: {}", self.from_id, self.key, self.vals, self.peers, self.sig)
+        write!(f, "MessageReturned:\n\tfrom: {:?}\n\tkey: {:?}\n\tvals: {:?}\n\tpeers: {:?}\n\tsig: {:?}", self.from_id, self.key, self.vals, self.peers, self.sig)
     }
 }
 
@@ -49,64 +50,116 @@ impl MessageReturned {
     }
 }
 
-tarpc::service! {
-    rpc ping(from: Peer) -> MessageReturned;
-    rpc store(key: Key, value: String) -> MessageReturned;
-    rpc find_node(node_id: Key) -> MessageReturned;
-    rpc find_value(key: Key) -> MessageReturned;
-}
-
 #[derive(Clone)]
-pub struct S4hServer {
+pub struct S4hServer<S>
+where S: Spawn + Clone + Send + 'static {
     map: CHashMap<Key, Vec<String>>,
-    peer_info: PeerInfo,
+    peer_info: Arc<PeerInfo>,
+    my_addr: SocketAddr,
+    spawner: S,
 }
 
-impl S4hServer {
+fn validate_peer(peer: &Peer, sig: ()) -> bool {
+    // TODO check that S/Kad ID generation requirement is met
+    // TODO check that signature authenticates messsage
+    // TODO update kbuckets with this node
+    true 
+}
+
+impl<S> S4hServer<S>
+where S: Spawn + Clone + Send + 'static {
     
-    pub fn new() -> Arc<S4hServer> {
-        Arc::new(S4hServer {
+    pub fn new(my_addr: &SocketAddr, spawner: S) -> S4hServer<S> {
+        S4hServer {
             map: CHashMap::<Key, Vec<String>>::new(),
-            peer_info: PeerInfo::new(),
-        })
+            peer_info: Arc::new(PeerInfo::new()),
+            my_addr: my_addr.clone(),
+            spawner: spawner,
+        }
     }
 
     /// Should get a peer with each request,
     /// validate that it's either in the kbuckets, so update
     /// or make a client to it, call ping, verify signature of response, and add it to kbuckets
-    pub fn validate_and_update_peer(&mut self, peer: Peer) -> bool {
-        // TODO check that S/Kad ID generation requirement is met
-        // TODO check that signature authenticates messsage
-        // TODO update kbuckets with this node
+    pub async fn validate_and_update_or_add_peer_with_ping(&mut self, peer: Peer, sig: ()) -> bool {
+        if validate_peer(&peer, sig) == false {
+            return false;
+        }
         let contains = self.peer_info.contains(&peer.id);
         if contains {
             self.peer_info.update(&peer.id);
         }
         else {
-            let transport = bincode_transport::connect(&peer.addr)?;
-            let options = client::Config::default();
-            let client = tokio_executor::spawn(new_stub(options, transport)
-                                         .and_then(|client| {
-                                            self.peer_info.insert(&peer.id, peer.addr, Box::new(client));
-                                            client.ping(peer)
-                                         })
-                                         .map_err(|_| ())
-                                         .map(|_| ()));
+            self.add_peer_at_address_with_ping(peer.addr.clone());
         }
         return true;
     }
+    
+    /// Should get a peer with each request,
+    /// validate that it's either in the kbuckets, so update
+    /// or add it
+    pub async fn validate_and_update_or_add_peer_with_sig(&mut self, peer: Peer, sig: ()) -> bool {
+        if validate_peer(&peer, sig) == false {
+            return false;
+        }
+        let contains = self.peer_info.contains(&peer.id);
+        if contains {
+            self.peer_info.update(&peer.id);
+        }
+        else {
+            self.add_peer(&peer);
+        }
+        return true;
+    }
+
+    pub async fn add_peer_at_address_with_ping(&mut self, peer_addr: SocketAddr) -> Option<Box<Client>> {
+        let transport = await!(bincode_transport::connect(&peer_addr));
+        if let Ok(transport) = transport {
+            let options = client::Config::default();
+            let client = await!(new_stub(options, transport));
+            if let Ok(mut client) = client {
+                let resp = await!(client.ping(context::current(), (self.my_addr.clone(), self.peer_info.id.clone()).into(), ()));
+                if let Ok(resp) = resp {
+                    self.peer_info.insert(&resp.from_id, peer_addr, Box::new(client));
+                    return self.peer_info.get(&resp.from_id).deref().get(&resp.from_id).expect("peer that I just added").client.clone();
+                }
+            }
+        }
+        None
+    }    
+    
+    pub async fn add_peer<'a>(&'a mut self, peer: &'a Peer) -> Option<Box<Client>> {
+        let transport = await!(bincode_transport::connect(&peer.addr));
+        if let Ok(transport) = transport {
+            let options = client::Config::default();
+            let client = await!(new_stub(options, transport));
+            if let Ok(client) = client {
+                self.peer_info.insert(&peer.id, peer.addr.clone(), Box::new(client));
+                return self.peer_info.get(&peer.id).deref().get(&peer.id).expect("peer that I just added").client.clone();
+            }
+        }
+        None
+    }
 }
 
-impl Service for Arc<S4hServer> {
+tarpc::service! {
+    rpc ping(from: Peer, sig: ()) -> MessageReturned;
+    rpc store(key: Key, value: String) -> MessageReturned;
+    rpc find_node(node_id: Key) -> MessageReturned;
+    rpc find_value(key: Key) -> MessageReturned;
+}
+
+impl<S> Service for S4hServer<S>
+where S: Spawn + Clone + Send + 'static {
     type PingFut = Ready<MessageReturned>;
     type StoreFut = Ready<MessageReturned>;
     type FindNodeFut = Ready<MessageReturned>;
     type FindValueFut = Ready<MessageReturned>;
 
-    /// Respond with a () if this peer is alive
-    fn ping(&self, _context: context::Context, from: Peer) -> Self::PingFut {
+    /// Respond if this peer is alive
+    fn ping(&self, _context: context::Context, from: Peer, sig: ()) -> Self::PingFut {
         info!("Received a ping request");
-        self.validate_and_update_peer(from); // TODO handle invalid peers
+        //let valid: bool = self.spawner.spawn_obj(self.validate_and_update_peer(from)); // TODO handle invalid peers
         let response = MessageReturned::from_id(self.peer_info.id.clone());
         future::ready(response)
     }
@@ -121,7 +174,8 @@ impl Service for Arc<S4hServer> {
         else {
             self.map.insert_new(key, vec![value]);
         }
-        future::ready(())
+        let response = MessageReturned::from_id(self.peer_info.id.clone());
+        future::ready(response)
     }
 
     /// Find a node by it's ID

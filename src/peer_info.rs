@@ -1,7 +1,7 @@
 
 use std::collections::LinkedList;
 use std::net::SocketAddr;
-use std::sync::RwLock;
+use std::sync::{RwLock, RwLockReadGuard};
 use std::ops::{Deref, DerefMut};
 
 use bytes::Bytes;
@@ -86,6 +86,7 @@ impl KBucket {
         self.0.append(&mut tail);
     }
 
+    /// O(n) lookup
     pub fn contains(&self, key: &Key) -> bool {
         for peer in self.0.iter() {
             if peer.id == key {
@@ -142,6 +143,16 @@ impl KBucket {
         }
         false
     }
+
+    /// O(n) lookup
+    pub fn get<'a>(&'a self, key: &Key) -> Option<&'a Peer> {
+        for peer in self.0.iter() {
+            if peer.id == key {
+                return Some(peer);
+            }
+        }
+        None
+    }
 }
 
 
@@ -189,13 +200,19 @@ impl PeerInfo {
         return 0;
     }
 
+    pub fn get<'a>(&'a self, k: &Key) -> RwLockReadGuard<'a, KBucket> {
+        let i: usize = self.bucket_of(k);
+        let bucket: std::sync::RwLockReadGuard<'a, KBucket> = self.buckets[i].read().expect("obtain kbucket read lock");
+        bucket
+    }
+
     pub fn contains(&self, k: &Key) -> bool {
         let i = self.bucket_of(k);
         self.buckets[i].read().expect("obtain kbucket read lock").deref().contains(k)
     }
 
     /// Updates a node_id by moving it to the end of the list
-    pub fn update(&mut self, k: &Key) {
+    pub fn update(&self, k: &Key) {
         let bucket_num = self.bucket_of(k);
         let mut bucket_read = self.buckets[bucket_num].write()
                                                  .expect("obtain kbucket write lock");
@@ -206,7 +223,7 @@ impl PeerInfo {
         }
     }
 
-    pub fn insert(&mut self, k: &Key, addr: SocketAddr, client: Box<Client>) {
+    pub fn insert(&self, k: &Key, addr: SocketAddr, client: Box<Client>) {
         let bucket_num = self.bucket_of(k);
         let mut bucket_read = self.buckets[bucket_num].write()
                                                  .expect("obtain kbucket write lock");
