@@ -13,15 +13,16 @@ use bincode_transport;
 use dotenv;
 use failure::{Error, format_err};
 use futures::{
+    StreamExt,
     compat::{Future01CompatExt},
     prelude::*,
-    future::{Future, FutureExt, TryFuture, TryFutureExt},
+    future::{self, FutureExt, TryFuture, TryFutureExt,},
     executor::ThreadPool,
     task::{SpawnExt},
 };
 use log::{error, info};
 use tarpc::{
-    client, context,
+    client, context, init,
     server::{self, Handler, Server},
 };
 use tokio::timer::Delay;
@@ -58,15 +59,8 @@ async fn run(spawner: ThreadPool, is_client: bool, server_addr: SocketAddr, clie
         info!("Find_val response: {}", find_val_resp);
     }
 
-    let when = Instant::now() + Duration::from_millis(100);
-    let task = Delay::new(when).compat()
-        .and_then(|_| {
-            println!("Hello world!");
-            Ok(())
-        })
-        .map_err(|e| error!("delay errored; err={:?}", e));
-
-    spawner2.run(task);
+    let never_finish = future::empty();
+    let () = await!(never_finish);
 
     Ok(())
 }
@@ -100,8 +94,9 @@ fn main() {
     };
 
     let mut thread_pool = ThreadPool::new().expect("Create ThreadPool");
+    tarpc::init(thread_pool.clone());
     thread_pool.run(
         run(thread_pool.clone(), is_client, listen_addr, peer_addr)
             .map_err(|e| error!("ERROR: {}", e))
-        ).expect("thread pool spawn \"run\" fn");
+        ).expect("thread pool spawn run fn");
 }

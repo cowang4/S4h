@@ -20,6 +20,7 @@ serde = "1"
 serde_derive = "1"
 tarpc = { version = "0.13.0", features = ["serde1"] }
 tokio = "0.1"
+tokio-executor = "0.1"
 url = "1.7"
 url_serde = "0.2"
 uuid = { version = "0.7.0", features = ["serde", "v4"] }
