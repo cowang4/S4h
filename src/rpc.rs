@@ -7,9 +7,8 @@ use std::ops::{Deref, DerefMut};
 use bincode_transport;
 use chashmap::CHashMap;
 use futures::{
+    executor::{ThreadPool},
     future::{self, Ready},
-    prelude::*,
-    task::{Spawn, SpawnExt},
 };
 use log::{info};
 use tarpc::{
@@ -51,12 +50,11 @@ impl MessageReturned {
 }
 
 #[derive(Clone)]
-pub struct S4hServer<S>
-where S: Spawn + Clone + Send + 'static {
+pub struct S4hServer {
     map: CHashMap<Key, Vec<String>>,
     peer_info: Arc<PeerInfo>,
     my_addr: SocketAddr,
-    spawner: S,
+    spawner: ThreadPool,
 }
 
 fn validate_peer(peer: &Peer, sig: ()) -> bool {
@@ -66,10 +64,9 @@ fn validate_peer(peer: &Peer, sig: ()) -> bool {
     true 
 }
 
-impl<S> S4hServer<S>
-where S: Spawn + Clone + Send + 'static {
+impl S4hServer {
     
-    pub fn new(my_addr: &SocketAddr, spawner: S) -> S4hServer<S> {
+    pub fn new(my_addr: &SocketAddr, spawner: ThreadPool) -> S4hServer {
         S4hServer {
             map: CHashMap::<Key, Vec<String>>::new(),
             peer_info: Arc::new(PeerInfo::new()),
@@ -81,7 +78,7 @@ where S: Spawn + Clone + Send + 'static {
     /// Should get a peer with each request,
     /// validate that it's either in the kbuckets, so update
     /// or make a client to it, call ping, verify signature of response, and add it to kbuckets
-    pub async fn validate_and_update_or_add_peer_with_ping(&mut self, peer: Peer, sig: ()) -> bool {
+    pub async fn validate_and_update_or_add_peer_with_ping(& self, peer: Peer, sig: ()) -> bool {
         if validate_peer(&peer, sig) == false {
             return false;
         }
@@ -98,7 +95,7 @@ where S: Spawn + Clone + Send + 'static {
     /// Should get a peer with each request,
     /// validate that it's either in the kbuckets, so update
     /// or add it
-    pub async fn validate_and_update_or_add_peer_with_sig(&mut self, peer: Peer, sig: ()) -> bool {
+    pub async fn validate_and_update_or_add_peer_with_sig(&self, peer: Peer, sig: ()) -> bool {
         if validate_peer(&peer, sig) == false {
             return false;
         }
@@ -112,7 +109,7 @@ where S: Spawn + Clone + Send + 'static {
         return true;
     }
 
-    pub async fn add_peer_at_address_with_ping(&mut self, peer_addr: SocketAddr) -> Option<Box<Client>> {
+    pub async fn add_peer_at_address_with_ping(& self, peer_addr: SocketAddr) -> Option<Box<Client>> {
         let transport = await!(bincode_transport::connect(&peer_addr));
         if let Ok(transport) = transport {
             let options = client::Config::default();
@@ -128,7 +125,7 @@ where S: Spawn + Clone + Send + 'static {
         None
     }    
     
-    pub async fn add_peer<'a>(&'a mut self, peer: &'a Peer) -> Option<Box<Client>> {
+    pub async fn add_peer<'a>(&'a self, peer: &'a Peer) -> Option<Box<Client>> {
         let transport = await!(bincode_transport::connect(&peer.addr));
         if let Ok(transport) = transport {
             let options = client::Config::default();
@@ -149,8 +146,7 @@ tarpc::service! {
     rpc find_value(key: Key) -> MessageReturned;
 }
 
-impl<S> Service for S4hServer<S>
-where S: Spawn + Clone + Send + 'static {
+impl Service for S4hServer {
     type PingFut = Ready<MessageReturned>;
     type StoreFut = Ready<MessageReturned>;
     type FindNodeFut = Ready<MessageReturned>;
@@ -159,7 +155,8 @@ where S: Spawn + Clone + Send + 'static {
     /// Respond if this peer is alive
     fn ping(&self, _context: context::Context, from: Peer, sig: ()) -> Self::PingFut {
         info!("Received a ping request");
-        //let valid: bool = self.spawner.spawn_obj(self.validate_and_update_peer(from)); // TODO handle invalid peers
+        let mut spawner2 = self.spawner.clone();
+        let valid: bool = spawner2.run(self.validate_and_update_or_add_peer_with_sig(from, sig)); // TODO handle invalid peers
         let response = MessageReturned::from_id(self.peer_info.id.clone());
         future::ready(response)
     }

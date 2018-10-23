@@ -7,28 +7,32 @@ mod rpc;
 
 use std::env;
 use std::net::SocketAddr;
+use std::time::{Duration, Instant};
 
 use bincode_transport;
 use dotenv;
 use failure::{Error, format_err};
 use futures::{
+    compat::{Future01CompatExt},
     prelude::*,
+    future::{Future, FutureExt, TryFuture, TryFutureExt},
     executor::ThreadPool,
-    task::{Spawn, SpawnExt},
+    task::{SpawnExt},
 };
 use log::{error, info};
 use tarpc::{
     client, context,
     server::{self, Handler, Server},
 };
+use tokio::timer::Delay;
 
-use crate::{hash::hash, rpc::{S4hServer, new_stub, serve, Service}};
+use crate::{hash::hash, rpc::{S4hServer, new_stub, serve}};
 
 
 async fn run(spawner: ThreadPool, is_client: bool, server_addr: SocketAddr, client_addr: SocketAddr) -> Result<(), Error> {
     let mut spawner2 = spawner.clone();
     // server init code
-    let s4h_server = S4hServer::<ThreadPool>::new(&server_addr, spawner);
+    let s4h_server = S4hServer::new(&server_addr, spawner);
     let server_transport = bincode_transport::listen(&server_addr)?;
     let server = Server::new(server::Config::default())
         .incoming(server_transport)
@@ -53,6 +57,16 @@ async fn run(spawner: ThreadPool, is_client: bool, server_addr: SocketAddr, clie
         let find_val_resp = await!(client.find_value(context::current(), hello_hash2))?;
         info!("Find_val response: {}", find_val_resp);
     }
+
+    let when = Instant::now() + Duration::from_millis(100);
+    let task = Delay::new(when).compat()
+        .and_then(|_| {
+            println!("Hello world!");
+            Ok(())
+        })
+        .map_err(|e| error!("delay errored; err={:?}", e));
+
+    spawner2.run(task);
 
     Ok(())
 }
