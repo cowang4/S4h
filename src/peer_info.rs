@@ -165,7 +165,10 @@ pub struct PeerInfo {
 impl PeerInfo {
     
     pub fn new() -> PeerInfo {
-        let vec = Vec::<RwLock<KBucket>>::with_capacity(KEY_SIZE_BITS);
+        let mut vec = Vec::<RwLock<KBucket>>::with_capacity(KEY_SIZE_BITS);
+        for i in 0..KEY_SIZE_BITS {
+            vec.push(RwLock::new(KBucket::new()));
+        }
         let id = Bytes::from(&Uuid::new_v4().as_bytes()[..]);
         PeerInfo {
             buckets: vec,
@@ -334,6 +337,13 @@ mod tests {
         bucket1.push_back(("127.0.0.1:8080".parse().unwrap(), k1.clone()).into());
         assert_eq!(bucket1.remove(&k1), true);
         assert_eq!(bucket1.is_empty(), true);
+    }
+
+    #[test]
+    fn test_contains() {
+        let pi = PeerInfo::new();
+        println!("PeerInfo.buckets {:?}", pi.buckets);
+        assert_eq!(pi.buckets.len(), KEY_SIZE_BITS);
     }
 
 }

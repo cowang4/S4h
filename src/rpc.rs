@@ -50,9 +50,9 @@ impl MessageReturned {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct S4hServer {
-    map: CHashMap<Key, Vec<String>>,
+    map: Arc<CHashMap<Key, Vec<String>>>,
     peer_info: Arc<PeerInfo>,
     my_addr: SocketAddr,
     spawner: ThreadPool,
@@ -69,7 +69,7 @@ impl S4hServer {
     
     pub fn new(my_addr: &SocketAddr, spawner: ThreadPool) -> S4hServer {
         S4hServer {
-            map: CHashMap::<Key, Vec<String>>::new(),
+            map: Arc::new(CHashMap::<Key, Vec<String>>::new()),
             peer_info: Arc::new(PeerInfo::new()),
             my_addr: my_addr.clone(),
             spawner: spawner,
@@ -105,8 +105,8 @@ impl S4hServer {
             self.peer_info.update(&peer.id);
         }
         else {
-
-            self.add_peer(&peer);
+            info!("Adding peer: {:?}!", &peer);
+            await!(self.add_peer(&peer));
         }
         return true;
     }
@@ -139,6 +139,10 @@ impl S4hServer {
         }
         None
     }
+
+    pub fn get_my_peer(&self) -> Peer {
+        Peer::from((self.my_addr, self.peer_info.id.clone()))
+    }
 }
 
 tarpc::service! {
@@ -158,8 +162,10 @@ impl Service for S4hServer {
     fn ping(&self, _context: context::Context, from: Peer, sig: ()) -> Self::PingFut {
         info!("Received a ping request");
         let mut spawner2 = self.spawner.clone();
-        let update = self.validate_and_update_or_add_peer_with_sig(from, sig); // TODO handle invalid peers
+        let update = self.validate_and_update_or_add_peer_with_sig(from, sig);
         let valid: bool = spawner2.run(update);
+        // TODO handle invalid peers
+        info!("Updated Server: {:?}", self);
         let response = MessageReturned::from_id(self.peer_info.id.clone());
         future::ready(response)
     }
@@ -169,12 +175,23 @@ impl Service for S4hServer {
     fn store(&self, _context: context::Context, key: Key, value: String) -> Self::StoreFut {
         info!("Received a store request");
         if self.map.contains_key(&key) {
+            info!("Pushing back value");
             self.map.get_mut(&key).unwrap().deref_mut().push(value);
         }
         else {
-            self.map.insert_new(key, vec![value]);
+            info!("Insert_new key with value");
+            self.map.insert_new(key.clone(), vec![value]);
         }
-        let response = MessageReturned::from_id(self.peer_info.id.clone());
+        let mut response = MessageReturned::from_id(self.peer_info.id.clone());
+        response.key = Some(key.clone());
+        match self.map.get(&key) {
+            Some(values) => {
+                response.vals = Some(values.deref().clone());
+            },
+            None => {
+                response.vals = None;
+            }
+        }
         future::ready(response)
     }
 
@@ -188,12 +205,14 @@ impl Service for S4hServer {
         info!("Received a find value request");
         match self.map.get(&key) {
             Some(values) => {
+                info!("Found key in store");
                 let mut response = MessageReturned::from_id(self.peer_info.id.clone());
                 response.key = Some(key);
                 response.vals = Some(values.deref().clone());
                 return future::ready(response);
             },
             None => {
+                info!("Didn't found key in store");
                 unimplemented!();
             }
         }

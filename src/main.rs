@@ -14,7 +14,7 @@ use dotenv;
 use failure::{Error, format_err};
 use futures::{
     StreamExt,
-    compat::{Future01CompatExt},
+    compat::{Future01CompatExt, TokioDefaultSpawner},
     prelude::*,
     future::{self, FutureExt, TryFuture, TryFutureExt,},
     executor::ThreadPool,
@@ -26,6 +26,7 @@ use tarpc::{
     server::{self, Handler, Server},
 };
 use tokio::timer::Delay;
+use tokio_executor;
 
 use crate::{hash::hash, rpc::{S4hServer, new_stub, serve}};
 
@@ -34,14 +35,15 @@ async fn run(spawner: ThreadPool, is_client: bool, server_addr: SocketAddr, clie
     let mut spawner2 = spawner.clone();
     // server init code
     let s4h_server = S4hServer::new(&server_addr, spawner);
+    let my_peer = s4h_server.get_my_peer();
     let server_transport = bincode_transport::listen(&server_addr)?;
     let server = Server::new(server::Config::default())
         .incoming(server_transport)
         .take(1)
         .respond_with(serve(s4h_server.clone()));
 
-    info!("Running server...");
-    spawner2.spawn(server).map_err(|err| format_err!("Spawning server failed: {:?}", err))?;
+    info!("Running server on {} with id {:?} ...", &my_peer.addr, &my_peer.id);
+    tokio_executor::spawn(server.unit_error().boxed().compat());
 
 
     if is_client {
@@ -50,6 +52,9 @@ async fn run(spawner: ThreadPool, is_client: bool, server_addr: SocketAddr, clie
         let mut client = await!(new_stub(client::Config::default(), client_transport))?;
 
         // client test example
+        let ping_resp = await!(client.ping(context::current(), my_peer, ()))?;
+        info!("Ping response: {}", ping_resp);
+
         let hello = "Hello, World!".as_bytes();
         let hello_hash = hash(hello);
         let hello_hash2 = hello_hash.clone();
@@ -94,9 +99,11 @@ fn main() {
     };
 
     let mut thread_pool = ThreadPool::new().expect("Create ThreadPool");
-    tarpc::init(thread_pool.clone());
-    thread_pool.run(
-        run(thread_pool.clone(), is_client, listen_addr, peer_addr)
+    tarpc::init(TokioDefaultSpawner);
+    tokio::run(
+        run(thread_pool, is_client, listen_addr, peer_addr)
             .map_err(|e| error!("ERROR: {}", e))
-        ).expect("thread pool spawn run fn");
+            .boxed()
+            .compat()
+        );
 }
