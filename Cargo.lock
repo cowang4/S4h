@@ -323,6 +323,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "hex"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+
+[[package]]
 name = "humantime"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -679,6 +684,7 @@ dependencies = [
  "env_logger 0.5.13 (registry+https://github.com/rust-lang/crates.io-index)",
  "failure 0.1.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "futures-preview 0.3.0-alpha.9 (registry+https://github.com/rust-lang/crates.io-index)",
+ "hex 0.3.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "log 0.4.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde 1.0.80 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde_derive 1.0.80 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1244,6 +1250,7 @@ dependencies = [
 "checksum futures-preview 0.3.0-alpha.9 (registry+https://github.com/rust-lang/crates.io-index)" = "fde02ea82d846abc2d0f0acf12646b55278f06f027b70977de0c771ba7140ad6"
 "checksum futures-sink-preview 0.3.0-alpha.9 (registry+https://github.com/rust-lang/crates.io-index)" = "cd7799480a224d80e9e915a6bf8bff27498e8210b831f5a513af09d5c1db2e36"
 "checksum futures-util-preview 0.3.0-alpha.9 (registry+https://github.com/rust-lang/crates.io-index)" = "b73a6f85964a8291914db0114ccb0045c994c58b2110c4cf4ac47f5d2176ec90"
+"checksum hex 0.3.2 (registry+https://github.com/rust-lang/crates.io-index)" = "805026a5d0141ffc30abb3be3173848ad46a1b1664fe632428479619a3644d77"
 "checksum humantime 1.1.1 (registry+https://github.com/rust-lang/crates.io-index)" = "0484fda3e7007f2a4a0d9c3a703ca38c71c54c55602ce4660c419fd32e188c9e"
 "checksum idna 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)" = "38f09e0f0b1fb55fdee1f17470ad800da77af5186a1a76c026b679358b7e844e"
 "checksum iovec 0.1.2 (registry+https://github.com/rust-lang/crates.io-index)" = "dbe6e417e7d0975db6512b90796e8ce223145ac4e33c377e4a42882a0e88bb08"

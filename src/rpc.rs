@@ -9,16 +9,15 @@ use chashmap::CHashMap;
 use futures::{
     executor::{ThreadPool},
     future::{self, Ready},
-    future::{FutureExt, TryFutureExt},
 };
-use log::{info};
+use log::{info, warn};
 use tarpc::{
     client,
     context,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::key::Key;
+use crate::key::{Key, key_fmt, option_key_fmt};
 use crate::peer_info::{Peer, PeerInfo};
 
 
@@ -33,7 +32,7 @@ pub struct MessageReturned {
 
 impl Display for MessageReturned {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "MessageReturned:\n\tfrom: {:?}\n\tkey: {:?}\n\tvals: {:?}\n\tpeers: {:?}\n\tsig: {:?}", self.from_id, self.key, self.vals, self.peers, self.sig)
+        write!(f, "MessageReturned:\n\tfrom: {:?}\n\tkey: {:?}\n\tvals: {:?}\n\tpeers: {:?}\n\tsig: {:?}", key_fmt(&self.from_id), option_key_fmt(&self.key), self.vals, self.peers, self.sig)
     }
 }
 
@@ -58,7 +57,7 @@ pub struct S4hServer {
     spawner: ThreadPool,
 }
 
-fn validate_peer(peer: &Peer, sig: ()) -> bool {
+fn validate_peer(_peer: &Peer, _sig: ()) -> bool {
     // TODO check that S/Kad ID generation requirement is met
     // TODO check that signature authenticates messsage
     // TODO update kbuckets with this node
@@ -74,23 +73,6 @@ impl S4hServer {
             my_addr: my_addr.clone(),
             spawner: spawner,
         }
-    }
-
-    /// Should get a peer with each request,
-    /// validate that it's either in the kbuckets, so update
-    /// or make a client to it, call ping, verify signature of response, and add it to kbuckets
-    pub async fn validate_and_update_or_add_peer_with_ping(&self, peer: Peer, sig: ()) -> bool {
-        if validate_peer(&peer, sig) == false {
-            return false;
-        }
-        let contains = self.peer_info.contains(&peer.id);
-        if contains {
-            self.peer_info.update(&peer.id);
-        }
-        else {
-            self.add_peer_at_address_with_ping(peer.addr.clone());
-        }
-        return true;
     }
     
     /// Should get a peer with each request,
@@ -111,22 +93,6 @@ impl S4hServer {
         return true;
     }
 
-    pub async fn add_peer_at_address_with_ping(&self, peer_addr: SocketAddr) -> Option<Box<Client>> {
-        let transport = await!(bincode_transport::connect(&peer_addr));
-        if let Ok(transport) = transport {
-            let options = client::Config::default();
-            let client = await!(new_stub(options, transport));
-            if let Ok(mut client) = client {
-                let resp = await!(client.ping(context::current(), (self.my_addr.clone(), self.peer_info.id.clone()).into(), ()));
-                if let Ok(resp) = resp {
-                    self.peer_info.insert(&resp.from_id, peer_addr, Box::new(client));
-                    return self.peer_info.get(&resp.from_id).deref().get(&resp.from_id).expect("peer that I just added").client.clone();
-                }
-            }
-        }
-        None
-    }    
-    
     pub async fn add_peer<'a>(&'a self, peer: &'a Peer) -> Option<Box<Client>> {
         let transport = await!(bincode_transport::connect(&peer.addr));
         if let Ok(transport) = transport {
@@ -162,9 +128,11 @@ impl Service for S4hServer {
     fn ping(&self, _context: context::Context, from: Peer, sig: ()) -> Self::PingFut {
         info!("Received a ping request");
         let mut spawner2 = self.spawner.clone();
-        let update = self.validate_and_update_or_add_peer_with_sig(from, sig);
+        let update = self.validate_and_update_or_add_peer_with_sig(from.clone(), sig);
         let valid: bool = spawner2.run(update);
-        // TODO handle invalid peers
+        if !valid {
+            warn!("Invalid ping request from peer: {:?}", &from);
+        }
         info!("Updated Server: {:?}", self);
         let response = MessageReturned::from_id(self.peer_info.id.clone());
         future::ready(response)
@@ -182,6 +150,7 @@ impl Service for S4hServer {
             info!("Insert_new key with value");
             self.map.insert_new(key.clone(), vec![value]);
         }
+        // TODO forward to closer nodes
         let mut response = MessageReturned::from_id(self.peer_info.id.clone());
         response.key = Some(key.clone());
         match self.map.get(&key) {

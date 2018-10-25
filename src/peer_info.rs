@@ -166,7 +166,7 @@ impl PeerInfo {
     
     pub fn new() -> PeerInfo {
         let mut vec = Vec::<RwLock<KBucket>>::with_capacity(KEY_SIZE_BITS);
-        for i in 0..KEY_SIZE_BITS {
+        for _ in 0..KEY_SIZE_BITS {
             vec.push(RwLock::new(KBucket::new()));
         }
         let id = Bytes::from(&Uuid::new_v4().as_bytes()[..]);
@@ -177,7 +177,10 @@ impl PeerInfo {
     }
 
     pub fn with_id(k: &Key) -> PeerInfo {
-        let vec = Vec::<RwLock<KBucket>>::with_capacity(KEY_SIZE_BITS);
+        let mut vec = Vec::<RwLock<KBucket>>::with_capacity(KEY_SIZE_BITS);
+        for _ in 0..KEY_SIZE_BITS {
+            vec.push(RwLock::new(KBucket::new()));
+        }
         PeerInfo {
             buckets: vec,
             id: k.clone(),
@@ -340,7 +343,7 @@ mod tests {
     }
 
     #[test]
-    fn test_contains() {
+    fn test_PeerInfo_length() {
         let pi = PeerInfo::new();
         println!("PeerInfo.buckets {:?}", pi.buckets);
         assert_eq!(pi.buckets.len(), KEY_SIZE_BITS);

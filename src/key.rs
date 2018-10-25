@@ -2,6 +2,7 @@
 use std::cmp::Ordering;
 
 use bytes::{Bytes, BytesMut, BufMut};
+use hex;
 
 
 pub const KEY_SIZE_BITS: usize = 128; // in bits
@@ -31,6 +32,17 @@ pub fn key_dist(k1: &Key, k2: &Key) -> Key {
         dist.put(b1 ^ b2);
     }
     dist.freeze()
+}
+
+pub fn key_fmt(k: &Key) -> String {
+    format!("{}", hex::encode(k))
+}
+
+pub fn option_key_fmt(k: &Option<Key>) -> String {
+    match k {
+        Some(k) => format!("Some({})", hex::encode(k)),
+        None    => "None".into()
+    }
 }
 
 #[cfg(test)]

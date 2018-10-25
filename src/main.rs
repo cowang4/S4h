@@ -7,32 +7,27 @@ mod rpc;
 
 use std::env;
 use std::net::SocketAddr;
-use std::time::{Duration, Instant};
 
 use bincode_transport;
 use dotenv;
-use failure::{Error, format_err};
+use failure::{Error};
 use futures::{
     StreamExt,
-    compat::{Future01CompatExt, TokioDefaultSpawner},
-    prelude::*,
-    future::{self, FutureExt, TryFuture, TryFutureExt,},
+    compat::{TokioDefaultSpawner},
+    future::{self, FutureExt, TryFutureExt},
     executor::ThreadPool,
-    task::{SpawnExt},
 };
 use log::{error, info};
 use tarpc::{
-    client, context, init,
+    client, context,
     server::{self, Handler, Server},
 };
-use tokio::timer::Delay;
 use tokio_executor;
 
-use crate::{hash::hash, rpc::{S4hServer, new_stub, serve}};
+use crate::{hash::hash, key::{key_fmt}, rpc::{S4hServer, new_stub, serve}};
 
 
 async fn run(spawner: ThreadPool, is_client: bool, server_addr: SocketAddr, client_addr: SocketAddr) -> Result<(), Error> {
-    let mut spawner2 = spawner.clone();
     // server init code
     let s4h_server = S4hServer::new(&server_addr, spawner);
     let my_peer = s4h_server.get_my_peer();
@@ -42,7 +37,7 @@ async fn run(spawner: ThreadPool, is_client: bool, server_addr: SocketAddr, clie
         .take(1)
         .respond_with(serve(s4h_server.clone()));
 
-    info!("Running server on {} with id {:?} ...", &my_peer.addr, &my_peer.id);
+    info!("Running server on {} with id {} ...", &my_peer.addr, key_fmt(&my_peer.id));
     tokio_executor::spawn(server.unit_error().boxed().compat());
 
 
@@ -98,7 +93,7 @@ fn main() {
         addr.parse().expect("Invalid client addr")
     };
 
-    let mut thread_pool = ThreadPool::new().expect("Create ThreadPool");
+    let thread_pool = ThreadPool::new().expect("Create ThreadPool");
     tarpc::init(TokioDefaultSpawner);
     tokio::run(
         run(thread_pool, is_client, listen_addr, peer_addr)
