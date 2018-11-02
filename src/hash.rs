@@ -3,7 +3,6 @@ use bytes::Bytes;
 
 use crate::key::{KEY_SIZE_BYTES, Key};
 
-pub const ALPHA: usize = 3; // concurrency parameter
 
 /// Hashes the input data to a KEY_SIZE_BYTES blake2b hash.
 pub fn hash(data: &[u8]) -> Key {

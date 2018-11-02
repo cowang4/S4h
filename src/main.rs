@@ -12,17 +12,16 @@ use bincode_transport;
 use dotenv;
 use failure::{Error};
 use futures::{
-    StreamExt,
     compat::{TokioDefaultSpawner},
-    future::{self, FutureExt, TryFutureExt},
+    future::{FutureExt, TryFutureExt},
     executor::ThreadPool,
 };
 use log::{error, info};
 use tarpc::{
     client, context,
-    server::{self, Handler, Server},
+    server::{self, Handler},
 };
-use tokio_executor;
+use tokio;
 
 use crate::{hash::hash, key::{key_fmt}, rpc::{S4hServer, new_stub, serve}};
 
@@ -32,35 +31,40 @@ async fn run(spawner: ThreadPool, is_client: bool, server_addr: SocketAddr, clie
     let s4h_server = S4hServer::new(&server_addr, spawner);
     let my_peer = s4h_server.get_my_peer();
     let server_transport = bincode_transport::listen(&server_addr)?;
-    let server = Server::new(server::Config::default())
+    let server = server::new(server::Config::default())
         .incoming(server_transport)
-        .take(1)
         .respond_with(serve(s4h_server.clone()));
 
     info!("Running server on {} with id {} ...", &my_peer.addr, key_fmt(&my_peer.id));
-    tokio_executor::spawn(server.unit_error().boxed().compat());
 
 
     if is_client {
+        tokio::spawn(server.unit_error().boxed().compat());
+
         // client init code
         let client_transport = await!(bincode_transport::connect(&client_addr))?;
         let mut client = await!(new_stub(client::Config::default(), client_transport))?;
 
         // client test example
-        let ping_resp = await!(client.ping(context::current(), my_peer, ()))?;
+        let ping_resp = await!(client.ping(context::current(), my_peer.clone(), ()))?;
         info!("Ping response: {}", ping_resp);
+
+        // testing client.clone(). It works!
+        let mut client2 = client.clone();
+        let ping_resp2 = await!(client2.ping(context::current(), my_peer.clone(), ()))?;
+        info!("Ping response: {}", ping_resp2);
 
         let hello = "Hello, World!".as_bytes();
         let hello_hash = hash(hello);
         let hello_hash2 = hello_hash.clone();
-        let store_resp = await!(client.store(context::current(), hello_hash, "ipfs://foobar".into()))?;
+        let store_resp = await!(client.store(context::current(), my_peer.clone(), (), hello_hash, "ipfs://foobar".into()))?;
         info!("Store response: {}", store_resp);
-        let find_val_resp = await!(client.find_value(context::current(), hello_hash2))?;
+        let find_val_resp = await!(client.find_value(context::current(), my_peer.clone(), (), hello_hash2))?;
         info!("Find_val response: {}", find_val_resp);
     }
-
-    let never_finish = future::empty();
-    let () = await!(never_finish);
+    else {
+        await!(server);
+    }
 
     Ok(())
 }
@@ -69,6 +73,10 @@ fn main() {
 
     // TODO overhaul error handling throughout whole project. Any function that can fail shoud
     // return a Result.
+    // TODO work on encapsulation. Make struct members private and helper functions
+    // TODO use Arc::clone(x) instead of x.clone()
+    // TODO shouldn't use systemclock for timeout, since no clock sync
+    // TODO fix when a client drops, but client obj thinks it's connected.
 
     dotenv::dotenv().expect("dotenv");
     env_logger::init();

@@ -1,20 +1,28 @@
 
-use std::collections::LinkedList;
+use std::cmp::Ordering;
+use std::collections::{LinkedList, linked_list};
+use std::fmt::{self, Debug, Display, Formatter};
 use std::net::SocketAddr;
 use std::sync::{RwLock, RwLockReadGuard};
+use std::time::{Duration};
 use std::ops::{Deref, DerefMut};
 
 use bytes::Bytes;
+use failure::{Error, format_err};
 use uuid::Uuid;
 use serde;
+use tarpc::{
+    context,
+};
 
-use crate::key::{Key, key_dist, KEY_SIZE_BITS, KEY_SIZE_BYTES};
+use crate::key::{Key, key_cmp, key_dist, key_fmt, KEY_SIZE_BITS, KEY_SIZE_BYTES};
 use crate::rpc::{Client};
 
 
-pub const K: usize = 20;
+pub const K: usize = 20;    /// KBucket size parameter
+pub const ALPHA: usize = 3; /// concurrency parameter
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Peer {
     pub id: Key,
     pub addr: SocketAddr,
@@ -33,7 +41,7 @@ impl Peer {
     pub fn new() -> Peer {
         Peer {
             id: Key::new(),
-            addr: "127.0.0.1:0".parse().unwrap(),
+            addr: "127.0.0.1:0".parse().expect("parse default addr"),
             client: None,
         }
     }
@@ -41,8 +49,54 @@ impl Peer {
     pub fn with_id(k: Key) -> Peer {
         Peer {
             id: k,
-            addr: "127.0.0.1:0".parse().unwrap(),
+            addr: "127.0.0.1:0".parse().expect("parse default addr"),
             client: None,
+        }
+    }
+
+    pub fn get_client(&mut self) -> Result<&mut Client, Error> {
+        if let Some(boxed_client) = &mut self.client {
+            Ok(boxed_client.deref_mut())
+        }
+        else {
+            // Creating client
+            // removed async from func sig
+            // let transport = await!(bincode_transport::connect(&self.addr))?;
+            // let client = await!(new_stub(client::Config::default(), transport))?;
+            // self.client = Some(Box::new(client));
+            // Ok(self.client.expect("client just added can be returned").deref())
+            Err(format_err!("No client to return"))
+        }
+    }
+
+    pub fn clone_client(&self) -> Result<Box<Client>, Error> {
+        if let Some(boxed_client) = &self.client {
+            Ok(boxed_client.clone())
+        }
+        else {
+            Err(format_err!("No client to return"))
+        }
+    }
+}
+
+impl Display for Peer {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        if self.client.is_some() {
+            write!(f, "Peer:\tid: {}\taddr: {:?}\tclient: Some", key_fmt(&self.id), self.addr)
+        }
+        else {
+            write!(f, "Peer:\tid: {}\taddr: {:?}\tclient: None", key_fmt(&self.id), self.addr)
+        }
+    }
+}
+
+impl Debug for Peer {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        if self.client.is_some() {
+            write!(f, "Peer:\tid: {}\taddr: {:?}\tclient: Some", key_fmt(&self.id), self.addr)
+        }
+        else {
+            write!(f, "Peer:\tid: {}\taddr: {:?}\tclient: None", key_fmt(&self.id), self.addr)
         }
     }
 }
@@ -66,6 +120,10 @@ impl KBucket {
         KBucket {
             0: LinkedList::<Peer>::new()
         }
+    }
+
+    pub fn full(&self) -> bool {
+        self.0.len() >= K
     }
 
     pub fn push_back(&mut self, elem: Peer) {
@@ -108,10 +166,6 @@ impl KBucket {
         self.0.len()
     }
 
-    pub fn full(&self) -> bool {
-        self.0.len() >= K
-    }
-
     
     /// Returns the 0-index of the key in the list,
     /// if it exists, else None
@@ -144,7 +198,7 @@ impl KBucket {
         false
     }
 
-    /// O(n) lookup
+    /// O(n) lookup of Peer by key
     pub fn get<'a>(&'a self, key: &Key) -> Option<&'a Peer> {
         for peer in self.0.iter() {
             if peer.id == key {
@@ -153,8 +207,22 @@ impl KBucket {
         }
         None
     }
+
+    pub fn iter(&self) -> linked_list::Iter<Peer> {
+        self.0.iter()
+    }
 }
 
+impl Display for KBucket {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        let mut res = String::from("KBucket: [");
+        for p in self.0.iter() {
+            res.push_str(&format!("{}, ", p));
+        }
+        res.push_str("]\n");
+        write!(f, "{}", res)
+    }
+}
 
 #[derive(Debug)]
 pub struct PeerInfo {
@@ -229,23 +297,149 @@ impl PeerInfo {
         }
     }
 
-    pub fn insert(&self, k: &Key, addr: SocketAddr, client: Box<Client>) {
-        let bucket_num = self.bucket_of(k);
-        let mut bucket_read = self.buckets[bucket_num].write()
+    pub async fn insert<'a>(&'a self, my_peer: Peer, k: Key, addr: SocketAddr, client: Box<Client>) {
+        let bucket_num = self.bucket_of(&k);
+        let mut bucket_write = self.buckets[bucket_num].write()
                                                  .expect("obtain kbucket write lock");
-        let bucket = bucket_read.deref_mut();
-        let index = bucket.index(k);
+        let bucket = bucket_write.deref_mut();
+        let index = bucket.index(&k);
         match index {
             Some(index) => bucket.move_to_back(index),
             None        => {
                 let mut peer = Peer::with_id(k.clone());
                 peer.addr = addr;
                 peer.client = Some(client);
-                bucket.push_back(peer);
+                if bucket.full() {
+                    let mut oldest = bucket.pop_front().expect("full bucket has a value");
+                    if let Ok(oldest_client) = oldest.get_client() {
+                        let mut ping_context = context::current();
+                        ping_context.deadline -= Duration::new(5, 0);
+                        let ping_resp = await!(oldest_client.ping(ping_context, my_peer, ()));
+                        match ping_resp {
+                            Ok(_resp) => {
+                                // TODO validate response
+                                bucket.push_back(oldest);
+                            },
+                            Err(_) => bucket.push_back(peer),
+                        }
+                    }
+                }
+                else {
+                    bucket.push_back(peer);
+                }
             }
         }
     }
+
+    /// Returns the K closer to key known peers.
+    /// Filters closest_k_peers by being closer than self to key.
+    pub fn closer_k_peers(&self, key: Key) -> Option<Vec<Peer>> {
+        let dist_from_self = key_dist(&self.id, &key);
+        let all_peers = self.closest_k_peers(key.clone());
+        if let Some(all_peers) = all_peers {
+            let filtered_peers: Vec<Peer> = all_peers.into_iter().filter(|k| key_cmp(&key_dist(&k.id, &key), &dist_from_self) == Ordering::Less).collect();
+            if filtered_peers.len() == 0 {
+                None
+            }
+            else {
+                Some(filtered_peers)
+            }
+        }
+        else {
+            None
+        }
+    }
+
+    /// Returns the x closest known peers to key.
+    fn closest_x_peers(&self, key: Key, x: usize) -> Option<Vec<Peer>> {
+       let mut all_peers = Vec::new();
+
+        for bucket_locked in self.buckets.iter() {
+            let bucket_read = bucket_locked.read().expect("obtain kbucket read lock");
+            let bucket = bucket_read.deref();
+            for peer in bucket.iter() {
+                all_peers.push(peer.clone());
+            }
+        }
+
+        all_peers.sort_unstable_by(|a, b| key_cmp(&key_dist(&key, &a.id), &key_dist(&key, &b.id)));
+        all_peers.truncate(x);
+
+        if all_peers.len() == 0 {
+            None
+        }
+        else {
+            Some(all_peers)
+        }
+    }
+
+    /// Returns the K closest known peers to key.
+    pub fn closest_k_peers(&self, key: Key) -> Option<Vec<Peer>> {
+        self.closest_x_peers(key, K)
+    }
+
+    /// Returns the ALPHA closest known peers to key.
+    pub fn closest_alpha_peers(&self, key: Key) -> Option<Vec<Peer>> {
+        self.closest_x_peers(key, ALPHA);
+    }
 }
+
+impl Display for PeerInfo {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        let mut res = format!("Peer Info:\n\tid: {}\n\tbuckets:\n", &key_fmt(&self.id));
+        let mut start_empty: Option<usize> = None;
+        for (i, bucket) in self.buckets.iter().enumerate() {
+            let bucket_read = bucket.read().expect("obtain kbucket read lock");
+            // consolidate empty rows
+            // cur is empty
+            let cur_empty = bucket_read.is_empty();
+            // prev was empty
+            let prev_empty = start_empty.is_some();
+            // last one of loop
+            let last_one = i == self.buckets.len()-1;
+            match (cur_empty, prev_empty, last_one) {
+                (true, true, true) => {
+                    res.push_str(&format!("\t\t2^{}-{}:\tNone\n", start_empty.unwrap()+1, i+1));
+                },
+                (false, true, true) => {
+                    if start_empty.unwrap()+1 != i {
+                        res.push_str(&format!("\t\t2^{}-{}:\tNone\n", start_empty.unwrap()+1, i));
+                    } else {
+                        res.push_str(&format!("\t\t2^{}:\tNone\n", i));
+                    }
+                    res.push_str(&format!("\t\t2^{}:\t{}\n", i+1, bucket_read));
+                    start_empty = None;
+                },
+                (true, true, false) => {
+                    // pass
+                },
+                (false, true, false) => {
+                    if start_empty.unwrap()+1 != i {
+                        res.push_str(&format!("\t\t2^{}-{}:\tNone\n", start_empty.unwrap()+1, i));
+                    } else {
+                        res.push_str(&format!("\t\t2^{}:\tNone\n", i));
+                    }
+                    res.push_str(&format!("\t\t2^{}:\t{}\n", i+1, bucket_read));
+                    start_empty = None;
+                },
+                (true, false, true) => {
+                    res.push_str(&format!("\t\t2^{}:\tNone\n", i+1));
+                },
+                (false, false, true) => {
+                    res.push_str(&format!("\t\t2^{}:\t{}\n", i+1, bucket_read));
+                },
+                (true, false, false) => {
+                    start_empty = Some(i);
+                },
+                (false, false, false) => {
+                    res.push_str(&format!("\t\t2^{}:\t{}\n", i+1, bucket_read));
+                },
+            };
+        }
+        write!(f, "{}", res)
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -343,7 +537,7 @@ mod tests {
     }
 
     #[test]
-    fn test_PeerInfo_length() {
+    fn test_peer_info_length() {
         let pi = PeerInfo::new();
         println!("PeerInfo.buckets {:?}", pi.buckets);
         assert_eq!(pi.buckets.len(), KEY_SIZE_BITS);

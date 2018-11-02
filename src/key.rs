@@ -74,5 +74,6 @@ mod tests {
         assert_eq!(key_dist(&x2, &x2), Bytes::from_static(&[0; 16]));
         assert_eq!(key_dist(&x2, &x3), Bytes::from_static(&[1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
         assert_eq!(key_dist(&x1, &x3), Bytes::from_static(&[254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255]));
+        assert_eq!(key_dist(&x3, &x1), Bytes::from_static(&[254, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255]));
     }
 }
