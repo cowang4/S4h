@@ -16,7 +16,7 @@ use tarpc::{
 };
 
 use crate::key::{Key, key_cmp, key_dist, key_fmt, KEY_SIZE_BITS, KEY_SIZE_BYTES};
-use crate::rpc::{Client};
+use crate::rpc::{Client, validate_resp};
 
 
 pub const K: usize = 20;    /// KBucket size parameter
@@ -288,9 +288,9 @@ impl PeerInfo {
     /// Updates a node_id by moving it to the end of the list
     pub fn update(&self, k: &Key) {
         let bucket_num = self.bucket_of(k);
-        let mut bucket_read = self.buckets[bucket_num].write()
+        let mut bucket_write = self.buckets[bucket_num].write()
                                                  .expect("obtain kbucket write lock");
-        let bucket = bucket_read.deref_mut();
+        let bucket = bucket_write.deref_mut();
         let index = bucket.index(k);
         if let Some(index) = index {
             bucket.move_to_back(index);
@@ -315,10 +315,14 @@ impl PeerInfo {
                         let mut ping_context = context::current();
                         ping_context.deadline -= Duration::new(5, 0);
                         let ping_resp = await!(oldest_client.ping(ping_context, my_peer, ()));
+                        let mut bucket_write = self.buckets[bucket_num].write()
+                                                 .expect("obtain kbucket write lock");
+                        let bucket = bucket_write.deref_mut();
                         match ping_resp {
-                            Ok(_resp) => {
-                                // TODO validate response
-                                bucket.push_back(oldest);
+                            Ok(resp) => {
+                                if validate_resp(&resp) {
+                                    bucket.push_back(oldest);
+                                }
                             },
                             Err(_) => bucket.push_back(peer),
                         }
@@ -380,7 +384,17 @@ impl PeerInfo {
 
     /// Returns the ALPHA closest known peers to key.
     pub fn closest_alpha_peers(&self, key: Key) -> Option<Vec<Peer>> {
-        self.closest_x_peers(key, ALPHA);
+        self.closest_x_peers(key, ALPHA)
+    }
+
+    pub fn remove(&self, key: &Key) -> bool {
+        let i = self.bucket_of(key);
+        let mut bucket_write = self.buckets[i].write().expect("obtain kbucket write lock");
+        let bucket = bucket_write.deref_mut();
+        if bucket.contains(key) {
+            return bucket.remove(key);
+        }
+        return false;
     }
 }
 

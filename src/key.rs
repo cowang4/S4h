@@ -5,7 +5,7 @@ use bytes::{Bytes, BytesMut, BufMut};
 use hex;
 
 
-pub const KEY_SIZE_BITS: usize = 128; // in bits
+pub const KEY_SIZE_BITS: usize = 128;
 pub const KEY_SIZE_BYTES: usize = KEY_SIZE_BITS / 8;
 
 // A big endian stored key
