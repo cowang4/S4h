@@ -157,20 +157,11 @@ impl S4hServer {
         Peer::from((self.my_addr, self.peer_info.id.clone()))
     }
 
-    pub fn get_client_for_key(&self, key: &Key) -> Option<Box<Client>> {
-        let bucket_read = self.peer_info.get(key);
-        let bucket = bucket_read.deref();
-        match bucket.get(key) {
-            Some(peer)  => peer.client.clone(),
-            None        => None
-        }
-    }
-
     pub fn node_lookup<'a>(&'a self, key: Key) -> Vec<Peer> {
         let mut spawner = self.spawner.clone();
         // will be filled with IDs of nodes that have been asked
         let mut queried = HashSet::<Key>::new();
-        let mut closest_peers = Vec::<(Key, Peer)>::new(); // dist
+        let mut closest_peers = Vec::<(Key, Peer)>::new(); // dist, Peer
         
         // Setup initial alpha peers
         let closest_initial_peers = self.peer_info.closest_alpha_peers(key.clone());
@@ -184,31 +175,42 @@ impl S4hServer {
 
         loop {
             info!("Starting next iteration of node_lookup. {} queried so far.", queried.len());
+            // gets the closest K or ALPHA (depending on the iteration) un-queried peers
             let to_query = match &closest_peer {
                 None => {
-                    closest_peers.iter_mut().filter(|peer| queried.contains(&peer.1.id)).take(K).collect::<Vec<&mut (Key, Peer)>>()
+                    closest_peers.iter_mut().filter(|peer| !queried.contains(&peer.1.id)).take(K).collect::<Vec<&mut (Key, Peer)>>()
                 },
                 Some(_) => {
-                    closest_peers.iter_mut().filter(|peer| queried.contains(&peer.1.id)).take(ALPHA).collect::<Vec<&mut (Key, Peer)>>()
+                    closest_peers.iter_mut().filter(|peer| !queried.contains(&peer.1.id)).take(ALPHA).collect::<Vec<&mut (Key, Peer)>>()
                 },
                 
             };
+
+            // will be filled with the peers that get returned
             let mut next_closest_peers = Vec::new();
+
+            // query each peer in to_query
             for peer_tup in to_query {
+                // mark this peer as queried so we don't ask it again
                 queried.insert(peer_tup.1.id.clone());
                 // TODO do this asyncly
+                // call find_node on that peer
                 let find_node_resp: Option<MessageReturned> = spawner.run(peer_tup.1.client.clone().expect("client").find_node(context::current(), self.get_my_peer(), (), key.clone())).ok();
                 if let Some(find_node_resp) = find_node_resp {
                     // TODO do this asyncly
+                    // validate the response, and update our kbuckets
                     let valid: bool = spawner.run(self.validate_and_update_or_add_peer_with_sig(find_node_resp.from.clone(), find_node_resp.sig.clone()));
                     if !valid {
                         continue;
                     }
                     if let Some(peers) = find_node_resp.peers {
                         for mut peer in peers {
-                            let optional_client: Option<Box<Client>> = spawner.run(self.add_peer(&peer));
-                            peer.client = optional_client;
-                            next_closest_peers.push((key_dist(&key, &peer.id), peer));
+                            // check that this node isn't us
+                            if peer.id != self.peer_info.id {
+                                let optional_client: Option<Box<Client>> = spawner.run(self.add_peer(&peer));
+                                peer.client = optional_client;
+                                next_closest_peers.push((key_dist(&key, &peer.id), peer));
+                            }
                         }
                     }
                 }
@@ -217,7 +219,12 @@ impl S4hServer {
             if closest_peers.len() == 0 || next_closest_peers.len() == 0 {
                 break;
             }
-            closest_peers.extend(next_closest_peers);
+            for new_peer in next_closest_peers {
+                // check that we don't already know about this peer
+                if !closest_peers.contains(&new_peer) {
+                    closest_peers.push(new_peer);
+                }
+            }
             closest_peer = Some(closest_peers[0].clone());
             closest_peers.sort_unstable_by(|a, b| key_cmp(&a.0, &b.0));
 
@@ -290,6 +297,7 @@ impl Service for S4hServer {
         if !valid {
             warn!("Invalid ping request from peer: {}", &from);
         }
+
         info!("Updated Server:\n{}", self);
 
         let response = MessageReturned::from_peer(self.get_my_peer());
@@ -308,7 +316,6 @@ impl Service for S4hServer {
         if !valid {
             warn!("Invalid store request from peer: {:?}", &from);
         }
-        info!("Updated Server:\n{}", self);
 
         // Store in hash table
         if self.map.contains_key(&key) {
@@ -330,6 +337,8 @@ impl Service for S4hServer {
         if closer_peers.is_some() {
             info!("{} closer peers to key: {}", closer_peers.as_ref().unwrap().len(), &key_fmt(&key));
         }
+
+        info!("Updated Server:\n{}", self);
 
         // build response
         let mut response = MessageReturned::from_peer(self.get_my_peer());
@@ -358,6 +367,7 @@ impl Service for S4hServer {
         if !valid {
             warn!("Invalid ping request from peer: {}", &from);
         }
+
         info!("Updated Server:\n{}", self);
 
         let closest_peers = self.peer_info.closest_k_peers(node_id.clone());
@@ -378,7 +388,6 @@ impl Service for S4hServer {
         if !valid {
             warn!("Invalid ping request from peer: {}", &from);
         }
-        info!("Updated Server:\n{}", self);
 
         let mut response = MessageReturned::from_peer(self.get_my_peer());
         response.key = Some(key.clone());
@@ -394,6 +403,8 @@ impl Service for S4hServer {
                 response.vals = None;
             }
         }
+
+        info!("Updated Server:\n{}", self);
 
         let closest_peers = self.peer_info.closest_k_peers(key.clone());
         response.peers = closest_peers;

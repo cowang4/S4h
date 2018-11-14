@@ -46,6 +46,7 @@ impl Peer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_id(k: Key) -> Peer {
         Peer {
             id: k,
@@ -82,10 +83,10 @@ impl Peer {
 impl Display for Peer {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         if self.client.is_some() {
-            write!(f, "Peer:\tid: {}\taddr: {:?}\tclient: Some", key_fmt(&self.id), self.addr)
+            write!(f, "Peer: id: {}  addr: {:?}  client: Some", key_fmt(&self.id), self.addr)
         }
         else {
-            write!(f, "Peer:\tid: {}\taddr: {:?}\tclient: None", key_fmt(&self.id), self.addr)
+            write!(f, "Peer: id: {}  addr: {:?}  client: None", key_fmt(&self.id), self.addr)
         }
     }
 }
@@ -93,10 +94,10 @@ impl Display for Peer {
 impl Debug for Peer {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         if self.client.is_some() {
-            write!(f, "Peer:\tid: {}\taddr: {:?}\tclient: Some", key_fmt(&self.id), self.addr)
+            write!(f, "Peer: id: {}  addr: {:?}  client: Some", key_fmt(&self.id), self.addr)
         }
         else {
-            write!(f, "Peer:\tid: {}\taddr: {:?}\tclient: None", key_fmt(&self.id), self.addr)
+            write!(f, "Peer: id: {}  addr: {:?}  client: None", key_fmt(&self.id), self.addr)
         }
     }
 }
@@ -186,7 +187,7 @@ impl KBucket {
                 self.0.pop_front().expect("front exists");
                 return true;
             }
-            if i == self.0.len() - 1 {
+            if i == self.len() - 1 {
                 self.0.pop_back().expect("back exists");
                 return true;
             }
@@ -230,27 +231,28 @@ pub struct PeerInfo {
     pub id: Key,
 }
 
+fn create_buckets() -> Vec<RwLock<KBucket>> {
+    let mut vec = Vec::<RwLock<KBucket>>::with_capacity(KEY_SIZE_BITS);
+    for _ in 0..KEY_SIZE_BITS {
+        vec.push(RwLock::new(KBucket::new()));
+    }
+    vec
+}
+
 impl PeerInfo {
     
     pub fn new() -> PeerInfo {
-        let mut vec = Vec::<RwLock<KBucket>>::with_capacity(KEY_SIZE_BITS);
-        for _ in 0..KEY_SIZE_BITS {
-            vec.push(RwLock::new(KBucket::new()));
-        }
         let id = Bytes::from(&Uuid::new_v4().as_bytes()[..]);
         PeerInfo {
-            buckets: vec,
+            buckets: create_buckets(),
             id: id,
         }
     }
 
+    #[allow(dead_code)]
     pub fn with_id(k: &Key) -> PeerInfo {
-        let mut vec = Vec::<RwLock<KBucket>>::with_capacity(KEY_SIZE_BITS);
-        for _ in 0..KEY_SIZE_BITS {
-            vec.push(RwLock::new(KBucket::new()));
-        }
         PeerInfo {
-            buckets: vec,
+            buckets: create_buckets(),
             id: k.clone(),
         }
     }
@@ -310,6 +312,8 @@ impl PeerInfo {
         peer.addr = addr;
         peer.client = Some(client);
         
+        // The use of the RwLockWriteGuard needs to be in a lower scope than the function
+        // because it's !Send. This is a limitation of the async generator.
         {
             let bucket_num = self.bucket_of(&k);
             let mut bucket_write = self.buckets[bucket_num].write()
@@ -333,14 +337,19 @@ impl PeerInfo {
         }
 
         if let Some(mut oldest_client) = oldest_client {
+            // ping oldest peer to see if it's still alive
+            // TODO this timeout stuff doesn't work.
             let mut ping_context = context::current();
             ping_context.deadline -= Duration::new(5, 0);
             let ping_resp = await!(oldest_client.ping(ping_context, my_peer, ()));
 
+            // Re-obtain a mut ref to the bucket, because of limitation of async generator
+            // See https://users.rust-lang.org/t/mutexguard-cannot-be-sent-inside-future-generator/21584
             let bucket_num = self.bucket_of(&k);
             let mut bucket_write = self.buckets[bucket_num].write()
                                      .expect("obtain kbucket write lock");
             let bucket = bucket_write.deref_mut();
+
             match ping_resp {
                 Ok(resp) => {
                     if validate_resp(&resp) {
@@ -429,6 +438,7 @@ impl Display for PeerInfo {
             let prev_empty = start_empty.is_some();
             // last one of loop
             let last_one = i == self.buckets.len()-1;
+
             match (cur_empty, prev_empty, last_one) {
                 (true, true, true) => {
                     res.push_str(&format!("\t\t2^{}-{}:\tNone\n", start_empty.unwrap()+1, i+1));
@@ -571,7 +581,6 @@ mod tests {
     #[test]
     fn test_peer_info_length() {
         let pi = PeerInfo::new();
-        println!("PeerInfo.buckets {:?}", pi.buckets);
         assert_eq!(pi.buckets.len(), KEY_SIZE_BITS);
     }
 
