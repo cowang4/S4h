@@ -28,7 +28,6 @@ use crate::{
     hash::hash,
     key::{key_fmt},
     rpc::{S4hServer, new_stub, serve},
-    peer_info::{Peer},
 };
 
 

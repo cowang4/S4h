@@ -297,42 +297,60 @@ impl PeerInfo {
         }
     }
 
+    /// Insert the peer if there's room in the right bucket.
+    /// Otherwise, ping the most stale peer in that bucket,
+    /// if that peer doesn't respond, drop it and the new one gets in.
+    /// else, it responded, so the new one gets dropped.
     pub async fn insert<'a>(&'a self, my_peer: Peer, k: Key, addr: SocketAddr, client: Box<Client>) {
-        let bucket_num = self.bucket_of(&k);
-        let mut bucket_write = self.buckets[bucket_num].write()
-                                                 .expect("obtain kbucket write lock");
-        let bucket = bucket_write.deref_mut();
-        let index = bucket.index(&k);
-        match index {
-            Some(index) => bucket.move_to_back(index),
-            None        => {
-                let mut peer = Peer::with_id(k.clone());
-                peer.addr = addr;
-                peer.client = Some(client);
-                if bucket.full() {
-                    let mut oldest = bucket.pop_front().expect("full bucket has a value");
-                    if let Ok(oldest_client) = oldest.get_client() {
-                        let mut ping_context = context::current();
-                        ping_context.deadline -= Duration::new(5, 0);
-                        let ping_resp = await!(oldest_client.ping(ping_context, my_peer, ()));
-                        let mut bucket_write = self.buckets[bucket_num].write()
-                                                 .expect("obtain kbucket write lock");
-                        let bucket = bucket_write.deref_mut();
-                        match ping_resp {
-                            Ok(resp) => {
-                                if validate_resp(&resp) {
-                                    bucket.push_back(oldest);
-                                }
-                            },
-                            Err(_) => bucket.push_back(peer),
+        
+        let mut oldest_client = None;
+        let mut oldest = None;
+
+        let mut peer = Peer::with_id(k.clone());
+        peer.addr = addr;
+        peer.client = Some(client);
+        
+        {
+            let bucket_num = self.bucket_of(&k);
+            let mut bucket_write = self.buckets[bucket_num].write()
+                                                     .expect("obtain kbucket write lock");
+            let bucket = bucket_write.deref_mut();
+            let index = bucket.index(&k);
+            match index {
+                Some(index) => bucket.move_to_back(index),
+                None        => {
+                    if bucket.full() {
+                        oldest = Some(bucket.pop_front().expect("full bucket has a value"));
+                        if let Ok(oldest_c) = oldest.clone().unwrap().clone_client() {
+                            oldest_client = Some(oldest_c);
                         }
                     }
-                }
-                else {
-                    bucket.push_back(peer);
+                    else {
+                        bucket.push_back(peer.clone());
+                    }
                 }
             }
         }
+
+        if let Some(mut oldest_client) = oldest_client {
+            let mut ping_context = context::current();
+            ping_context.deadline -= Duration::new(5, 0);
+            let ping_resp = await!(oldest_client.ping(ping_context, my_peer, ()));
+
+            let bucket_num = self.bucket_of(&k);
+            let mut bucket_write = self.buckets[bucket_num].write()
+                                     .expect("obtain kbucket write lock");
+            let bucket = bucket_write.deref_mut();
+            match ping_resp {
+                Ok(resp) => {
+                    if validate_resp(&resp) {
+                        bucket.push_back(oldest.expect("the full bucket has an oldest"));
+                    }
+                },
+                Err(_) => bucket.push_back(peer),
+            }
+        }
+
     }
 
     /// Returns the K closer to key known peers.

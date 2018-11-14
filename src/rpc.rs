@@ -136,7 +136,7 @@ impl S4hServer {
         let transport = await!(bincode_transport::connect(&peer));
         if let Ok(transport) = transport {
             let options = client::Config::default();
-            let mut client = await!(new_stub(options, transport));
+            let client = await!(new_stub(options, transport));
             if let Ok(mut client) = client {
                 let ping_resp = await!(client.ping(context::current(), self.get_my_peer(), ()));
                 if let Ok(ping_resp) = ping_resp {
@@ -231,6 +231,8 @@ impl S4hServer {
                 closest_peer = None;
             }
         }
+
+        info!("Finished node lookup");
 
         closest_peers.truncate(K);
         closest_peers.iter().map(|p| p.1.clone()).collect()
