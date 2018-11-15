@@ -18,7 +18,7 @@ use futures::{
     executor::ThreadPool,
     stream::{StreamExt},
 };
-use log::{error, warn, info};
+use log::{error, warn, info, debug};
 use tarpc::{
     server::{self, Handler},
 };
@@ -31,6 +31,7 @@ use crate::{
 };
 
 
+/// Creates a Peer and spawns a server listening at addr.
 fn create_peer(spawner: ThreadPool, addr: SocketAddr, take_num: Option<u64>) -> Result<S4hServer, Error> {
     let s4h_server = S4hServer::new(&addr, spawner);
     let my_peer = s4h_server.get_my_peer();
@@ -153,7 +154,7 @@ mod tests {
 
     async fn basic_rpc_test(spawner: ThreadPool, addr: SocketAddr, addr2: SocketAddr) -> Result<(), Error> {
         let s4h_server = create_peer(spawner.clone(), addr.clone(), Some(1))?;
-        let _my_peer = s4h_server.get_my_peer();
+        let my_peer = s4h_server.get_my_peer();
 
         let s4h_server2 = create_peer(spawner.clone(), addr2.clone(), Some(1))?;
         let my_peer2 = s4h_server2.get_my_peer();
@@ -165,20 +166,33 @@ mod tests {
 
         // client test example
         let ping_resp = await!(client.ping(context::current(), my_peer2.clone(), ()))?;
-        info!("Ping response: {}", ping_resp);
+        info!("Ping response: {}", &ping_resp);
+        assert_eq!(ping_resp.from.id, my_peer.id);
+        assert_eq!(ping_resp.from.addr, my_peer.addr);
 
         // testing client.clone().
         let mut client2 = client.clone();
         let ping_resp2 = await!(client2.ping(context::current(), my_peer2.clone(), ()))?;
-        info!("Ping response: {}", ping_resp2);
+        info!("Ping response: {}", &ping_resp2);
+        assert_eq!(ping_resp2.from.id, my_peer.id);
+        assert_eq!(ping_resp2.from.addr, my_peer.addr);
 
         let hello = "Hello, World!".as_bytes();
         let hello_hash = hash(hello);
         let hello_hash2 = hello_hash.clone();
+        let hello_hash3 = hello_hash.clone();
         let store_resp = await!(client.store(context::current(), my_peer2.clone(), (), hello_hash, "ipfs://foobar".into()))?;
-        info!("Store response: {}", store_resp);
+        info!("Store response: {}", &store_resp);
+        assert_eq!(store_resp.from.id, my_peer.id);
+        assert_eq!(store_resp.from.addr, my_peer.addr);
+        assert_eq!(store_resp.key, Some(hello_hash2.clone()));
+
         let find_val_resp = await!(client.find_value(context::current(), my_peer2.clone(), (), hello_hash2))?;
-        info!("Find_val response: {}", find_val_resp);
+        info!("Find_val response: {}", &find_val_resp);
+        assert_eq!(find_val_resp.from.id, my_peer.id);
+        assert_eq!(find_val_resp.from.addr, my_peer.addr);
+        assert_eq!(find_val_resp.key, Some(hello_hash3));
+        assert_eq!(find_val_resp.vals, Some(vec!["ipfs://foobar".to_string()]));
 
         Ok(())
     }
@@ -187,7 +201,7 @@ mod tests {
     #[test]
     fn basic_rpc_test_runner() {
         dotenv::dotenv().expect("dotenv");
-        env_logger::init();
+        let _ = env_logger::try_init();
 
         let addr: SocketAddr = "127.0.0.1:10234".parse().unwrap();
         let addr2: SocketAddr = "127.0.0.1:10235".parse().unwrap();
@@ -203,13 +217,90 @@ mod tests {
 
     }
 
-    async fn basic_api_test() {
+    async fn basic_api_test(spawner: ThreadPool, addr: SocketAddr, addr2: SocketAddr) -> Result<(), Error> {
         let s4h_server = create_peer(spawner.clone(), addr.clone(), Some(1))?;
-        let _my_peer = s4h_server.get_my_peer();
+
+        let s4h_server2 = create_peer(spawner.clone(), addr2.clone(), Some(1))?;
+
+        debug!("Adding peer2 to peer1's kbuckets");
+        await!(s4h_server.add_peer_by_addr(addr2.clone()));
+
+        debug!("Adding peer1 to peer2's kbuckets");
+        await!(s4h_server2.add_peer_by_addr(addr.clone()));
+        
+        let key = hash("Hello, World!".as_bytes());
+        let val = "ipfs://foobar".to_string();
+        await!(s4h_server.store(key.clone(), val));
+
+        info!("Finished basic_apt_test");
+        s4h_server.clear();
+        s4h_server2.clear();
+        Ok(())
     }
 
+    // This test isn't deterministic, because it generates node_ids randomly.
     #[test]
     fn basic_api_test_runner() {
+        dotenv::dotenv().expect("dotenv");
+        let _ = env_logger::try_init();
 
+        let addr: SocketAddr = "127.0.0.1:10236".parse().unwrap();
+        let addr2: SocketAddr = "127.0.0.1:10237".parse().unwrap();
+
+        let thread_pool = ThreadPool::new().expect("Create ThreadPool");
+        tarpc::init(TokioDefaultSpawner);
+        tokio::run(
+            basic_api_test(thread_pool, addr, addr2)
+                .map_err(|e| error!("ERROR: {}", e))
+                .boxed()
+                .compat()
+            );
+    }
+
+    async fn three_peer_test(spawner: ThreadPool, addr: SocketAddr, addr2: SocketAddr, addr3: SocketAddr) -> Result<(), Error> {
+
+        let s4h_server = create_peer(spawner.clone(), addr.clone(), Some(2))?;
+        let s4h_server2 = create_peer(spawner.clone(), addr2.clone(), Some(2))?;
+        let s4h_server3 = create_peer(spawner.clone(), addr3.clone(), Some(2))?;
+
+        await!(s4h_server.add_peer_by_addr(addr2.clone()));
+        await!(s4h_server2.add_peer_by_addr(addr3.clone()));
+
+        let key = hash("Hello, World!".as_bytes());
+        let val = "ipfs://foobar".to_string();
+        await!(s4h_server.store(key.clone(), val));
+
+        let vals = await!(s4h_server.find_value(key.clone()));
+        assert_eq!(vals, vec!["ipfs://foobar".to_string()]);
+
+        let key2 = hash("Goodbye!".as_bytes());
+        let no_vals = await!(s4h_server.find_value(key2));
+        assert_eq!(no_vals, Vec::<String>::new());
+
+        s4h_server.clear();
+        s4h_server2.clear();
+        s4h_server3.clear();
+        
+        Ok(())
+    }
+
+    // This test isn't deterministic, because it generates node_ids randomly.
+    #[test]
+    fn three_peer_test_runner() {
+        dotenv::dotenv().expect("dotenv");
+        let _ = env_logger::try_init();
+
+        let addr: SocketAddr = "127.0.0.1:10238".parse().unwrap();
+        let addr2: SocketAddr = "127.0.0.1:10239".parse().unwrap();
+        let addr3: SocketAddr = "127.0.0.1:10240".parse().unwrap();
+
+        let thread_pool = ThreadPool::new().expect("Create ThreadPool");
+        tarpc::init(TokioDefaultSpawner);
+        tokio::run(
+            three_peer_test(thread_pool, addr, addr2, addr3)
+                .map_err(|e| error!("ERROR: {}", e))
+                .boxed()
+                .compat()
+            );
     }
 }

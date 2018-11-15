@@ -11,7 +11,7 @@ use futures::{
     executor::{ThreadPool},
     future::{self, Ready},
 };
-use log::{info, warn, error};
+use log::{debug, info, warn, error};
 use tarpc::{
     client,
     context,
@@ -24,11 +24,11 @@ use crate::peer_info::{Peer, PeerInfo, ALPHA, K};
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct MessageReturned {
-    from: Peer,                 // from peer with id
-    key: Option<Key>,           // key/id to store or lookup
-    vals: Option<Vec<String>>,  // Strings to store or lookup
-    peers: Option<Vec<Peer>>,   // lookup: peers that are closer to key
-    sig: (),                    // TODO peer's signature of above data
+    pub from: Peer,                 // from peer with id
+    pub key: Option<Key>,           // key/id to store or lookup
+    pub vals: Option<Vec<String>>,  // Strings to store or lookup
+    pub peers: Option<Vec<Peer>>,   // lookup: peers that are closer to key
+    pub sig: (),                    // TODO peer's signature of above data
 }
 
 impl Display for MessageReturned {
@@ -117,6 +117,9 @@ impl S4hServer {
     /// if the least-recently seen node responds, it is moved
     /// to the tail of the list, and the new sender’s contact is
     /// discarded.
+    ///
+    /// NOTE peer should be verified (by pinging that IP and checking result) before this get's
+    /// called
     async fn add_peer<'a>(&'a self, peer: &'a Peer) -> Option<Box<Client>> {
         if self.peer_info.contains(&peer.id) {
             self.peer_info.update(&peer.id);
@@ -128,27 +131,38 @@ impl S4hServer {
         let options = client::Config::default();
         let client = await!(new_stub(options, transport)).ok()?;
         await!(self.peer_info.insert(self.get_my_peer(), peer.id.clone(), peer.addr.clone(), Box::new(client)));
-        return self.peer_info.get(&peer.id).deref().get(&peer.id).expect("peer that I just added").client.clone();
+        match self.peer_info.get(&peer.id).deref().get(&peer.id) {
+            Some(peer)  => peer.client.clone(),
+            None        => None,
+        }
     }
 
-    pub async fn add_peer_by_addr<'a>(&'a self, peer: SocketAddr) -> Option<Box<Client>> {
-        info!("Adding peer: {}!", &peer);
-        let transport = await!(bincode_transport::connect(&peer));
+    pub async fn add_peer_by_addr<'a>(&'a self, addr: SocketAddr) -> Option<Box<Client>> {
+        info!("{}: Start add_peer_by_addr: {}!", &self.my_addr, &addr);
+    
+        //TODO check that that addr isn't already in the kbuckets
+
+        let transport = await!(bincode_transport::connect(&addr));
         if let Ok(transport) = transport {
             let options = client::Config::default();
             let client = await!(new_stub(options, transport));
             if let Ok(mut client) = client {
+                debug!("add_peer_by_addr: created a client to {}, now pinging...", &addr);
                 let ping_resp = await!(client.ping(context::current(), self.get_my_peer(), ()));
                 if let Ok(ping_resp) = ping_resp {
                     if validate_resp(&ping_resp) {
                         let peer = ping_resp.from.clone();
-                        {
-                            await!(self.peer_info.insert(self.get_my_peer(), peer.id.clone(), peer.addr.clone(), Box::new(client)));
-                        }
-                        return self.peer_info.get(&peer.id).deref().get(&peer.id).expect("peer that I just added").client.clone();
+                        await!(self.peer_info.insert(self.get_my_peer(), peer.id.clone(), peer.addr.clone(), Box::new(client)));
+                        info!("{}: Finished add_peer_by_addr of {}", &self.my_addr, &peer);
+                        return match self.peer_info.get(&peer.id).deref().get(&peer.id) {
+                            Some(peer)  => peer.client.clone(),
+                            None        => None,
+                        };
                     }
                 }
             }
+        } else {
+            warn!("{}: Couldn't add_peer_by_addr for {}. Error: {:?}", &self.my_addr, &addr, transport);
         }
         None
     }
@@ -157,8 +171,8 @@ impl S4hServer {
         Peer::from((self.my_addr, self.peer_info.id.clone()))
     }
 
-    pub fn node_lookup<'a>(&'a self, key: Key) -> Vec<Peer> {
-        let mut spawner = self.spawner.clone();
+    pub async fn node_lookup<'a>(&'a self, key: Key) -> Vec<Peer> {
+        info!("{}: Starting node lookup of {}", &self.my_addr, &key_fmt(&key));
         // will be filled with IDs of nodes that have been asked
         let mut queried = HashSet::<Key>::new();
         let mut closest_peers = Vec::<(Key, Peer)>::new(); // dist, Peer
@@ -193,13 +207,15 @@ impl S4hServer {
             for peer_tup in to_query {
                 // mark this peer as queried so we don't ask it again
                 queried.insert(peer_tup.1.id.clone());
+                let mut peer_client = peer_tup.1.client.clone().expect("client");
                 // TODO do this asyncly
                 // call find_node on that peer
-                let find_node_resp: Option<MessageReturned> = spawner.run(peer_tup.1.client.clone().expect("client").find_node(context::current(), self.get_my_peer(), (), key.clone())).ok();
-                if let Some(find_node_resp) = find_node_resp {
+                let find_node_resp: Result<MessageReturned, std::io::Error> = await!(peer_client.find_node(context::current(), self.get_my_peer(), (), key.clone()));
+                debug!("find_node returned: {:?}", &find_node_resp);
+                if let Ok(find_node_resp) = find_node_resp {
                     // TODO do this asyncly
                     // validate the response, and update our kbuckets
-                    let valid: bool = spawner.run(self.validate_and_update_or_add_peer_with_sig(find_node_resp.from.clone(), find_node_resp.sig.clone()));
+                    let valid: bool = await!(self.validate_and_update_or_add_peer_with_sig(find_node_resp.from.clone(), find_node_resp.sig.clone()));
                     if !valid {
                         continue;
                     }
@@ -207,12 +223,14 @@ impl S4hServer {
                         for mut peer in peers {
                             // check that this node isn't us
                             if peer.id != self.peer_info.id {
-                                let optional_client: Option<Box<Client>> = spawner.run(self.add_peer(&peer));
+                                let optional_client: Option<Box<Client>> = await!(self.add_peer(&peer));
                                 peer.client = optional_client;
                                 next_closest_peers.push((key_dist(&key, &peer.id), peer));
                             }
                         }
                     }
+                } else {
+                    warn!("node_lookup find_node error: {:?}", &find_node_resp);
                 }
             }
 
@@ -234,12 +252,12 @@ impl S4hServer {
             // the FIND NODE to all of the k closest nodes it has
             // not already queried.
             // We will set closest_peer = None to signal to above to to_query K not ALPHA
-            if closest_peer.clone().expect("a peer").1.id != closest_peers.get(0).expect("another peer").1.id {
+            if closest_peer.clone().expect("a peer").1.id == closest_peers.get(0).expect("another peer").1.id {
                 closest_peer = None;
             }
         }
 
-        info!("Finished node lookup");
+        info!("{}: Finished node lookup of {}", &self.my_addr, &key_fmt(&key));
 
         closest_peers.truncate(K);
         closest_peers.iter().map(|p| p.1.clone()).collect()
@@ -247,28 +265,38 @@ impl S4hServer {
 
     /// Looks up the closest peers to key in the DHT and then sends them a store
     pub async fn store(&self, key: Key, value: String) {
-        let closest_peers_in_dht: Vec<Peer> = self.node_lookup(key.clone());
+        let closest_peers_in_dht: Vec<Peer> = await!(self.node_lookup(key.clone()));
+        let closest_peers_in_dht_len = closest_peers_in_dht.len();
         for peer in closest_peers_in_dht {
             if let Some(mut client) = peer.client {
                 await!(client.store(context::current(), self.get_my_peer(), (), key.clone(), value.clone()));
             }
         }
+        info!("{}: Finished store. Sent to {} peers.", &self.my_addr, closest_peers_in_dht_len);
     }
 
     pub async fn find_value(&self, key: Key) -> Vec<String> {
-        let closest_peers_in_dht: Vec<Peer> = self.node_lookup(key.clone());
+        let closest_peers_in_dht: Vec<Peer> = await!(self.node_lookup(key.clone()));
         let mut values = Vec::new();
         for peer in closest_peers_in_dht {
             if let Some(mut client) = peer.client {
                 let find_val_resp: Option<MessageReturned> = await!(client.find_value(context::current(), self.get_my_peer(), (), key.clone())).ok();
                 if let Some(find_val_resp) = find_val_resp {
                     if let Some(resp_vals) = find_val_resp.vals {
-                        values.extend(resp_vals);
+                        for value in resp_vals {
+                            if !values.contains(&value) {
+                                values.push(value);
+                            }
+                        }
                     }
                 }
             }
         }
         values
+    }
+
+    pub fn clear(self) {
+        self.peer_info.clear();
     }
 }
 
@@ -288,7 +316,7 @@ impl Service for S4hServer {
 
     /// Respond if this peer is alive
     fn ping(self, _context: context::Context, from: Peer, sig: ()) -> Self::PingFut {
-        info!("Received a ping request");
+        info!("{}: Received a ping request from {}", &self.my_addr, &from);
         
         // Validate request
         let mut spawner2 = self.spawner.clone();
@@ -300,6 +328,7 @@ impl Service for S4hServer {
 
         info!("Updated Server:\n{}", self);
 
+        info!("{}: Finished a ping request from {}", &self.my_addr, &from);
         let response = MessageReturned::from_peer(self.get_my_peer());
         future::ready(response)
     }
@@ -307,7 +336,7 @@ impl Service for S4hServer {
     /// Store this pair in the HashTable
     /// pair: (Key, URL)
     fn store(self, _context: context::Context, from: Peer, sig: (), key: Key, value: String) -> Self::StoreFut {
-        info!("Received a store request");
+        info!("{}: Received a store request from {}", &self.my_addr, &from);
 
         // validate request
         let mut spawner2 = self.spawner.clone();
@@ -339,6 +368,7 @@ impl Service for S4hServer {
         }
 
         info!("Updated Server:\n{}", self);
+        info!("{}: Finished a store request from {}", &self.my_addr, &from);
 
         // build response
         let mut response = MessageReturned::from_peer(self.get_my_peer());
@@ -358,7 +388,7 @@ impl Service for S4hServer {
     /// Find a node by it's ID
     /// Iterative, so just returns a list of closer peers.
     fn find_node(self, _context: context::Context, from: Peer, sig: (), node_id: Key) -> Self::FindNodeFut {
-        info!("Received a find node request for node_id: {}", &key_fmt(&node_id));
+        info!("{}: Received a find node request from {} for node_id: {}", &self.my_addr, &from, &key_fmt(&node_id));
 
         // Validate request
         let mut spawner2 = self.spawner.clone();
@@ -371,15 +401,17 @@ impl Service for S4hServer {
         info!("Updated Server:\n{}", self);
 
         let closest_peers = self.peer_info.closest_k_peers(node_id.clone());
+        info!("{}: Finished a find node request from {} for node_id: {}", &self.my_addr, &from, &key_fmt(&node_id));
         let mut response = MessageReturned::from_peer(self.get_my_peer());
         response.key = Some(node_id);
         response.peers = closest_peers;
+        info!("Actually done find_node now...");
         future::ready(response)
     }
 
     /// Find a value by it's key
     fn find_value(self, _context: context::Context, from: Peer, sig: (), key: Key) -> Self::FindValueFut {
-        info!("Received a find value request for key: {}", &key_fmt(&key));
+        info!("{}: Received a find value request from {} for key: {}", &self.my_addr, &from, &key_fmt(&key));
 
         // Validate request
         let mut spawner2 = self.spawner.clone();

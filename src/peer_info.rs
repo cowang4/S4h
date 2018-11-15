@@ -212,6 +212,10 @@ impl KBucket {
     pub fn iter(&self) -> linked_list::Iter<Peer> {
         self.0.iter()
     }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
 }
 
 impl Display for KBucket {
@@ -422,6 +426,14 @@ impl PeerInfo {
             return bucket.remove(key);
         }
         return false;
+    }
+
+    // clears the kbuckets, so that clients are dropped and the tests can finish
+    pub fn clear(&self) {
+        for bucket in self.buckets.iter() {
+            let mut bucket_write = bucket.write().expect("obtain kbucket write lock");
+            bucket_write.clear();
+        }
     }
 }
 
