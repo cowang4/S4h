@@ -26,14 +26,14 @@ use tokio;
 
 use crate::{
     hash::hash,
-    key::{key_fmt},
+    key::{key_fmt, Key},
     rpc::{S4hServer, serve},
 };
 
 
 /// Creates a Peer and spawns a server listening at addr.
-fn create_peer(spawner: ThreadPool, addr: SocketAddr, take_num: Option<u64>) -> Result<S4hServer, Error> {
-    let s4h_server = S4hServer::new(&addr, spawner);
+fn create_peer(spawner: ThreadPool, addr: SocketAddr, node_id: Option<Key>, take_num: Option<u64>) -> Result<S4hServer, Error> {
+    let s4h_server = S4hServer::new(&addr, node_id, spawner);
     let my_peer = s4h_server.get_my_peer();
     let server_transport = bincode_transport::listen(&addr)?;
     if let Some(take_num) = take_num {
@@ -57,7 +57,7 @@ fn create_peer(spawner: ThreadPool, addr: SocketAddr, take_num: Option<u64>) -> 
 }
 
 async fn command_line_shell(spawner: ThreadPool, addr: SocketAddr) -> Result<(), Error> {
-    let s4h_server: S4hServer = create_peer(spawner.clone(), addr, None)?;
+    let s4h_server: S4hServer = create_peer(spawner.clone(), addr, None, None)?;
     loop {
         print!("$ ");
         io::stdout().flush()?;
@@ -120,6 +120,9 @@ fn main() {
     // TODO use Arc::clone(x) instead of x.clone()
     // TODO fix when a client drops, but client obj thinks it's connected.
     // TODO tarpc shouldn't use systemclock for timeout, since no clock sync
+    // TODO fix the kbucket api, it is prone to creating deadlocks and can
+    // be dangerous because in between a contains check and some get or modify,
+    // the peer could be deleted.
 
     dotenv::dotenv().expect("dotenv");
     env_logger::init();
@@ -153,10 +156,10 @@ mod tests {
     use crate::rpc::{new_stub};
 
     async fn basic_rpc_test(spawner: ThreadPool, addr: SocketAddr, addr2: SocketAddr) -> Result<(), Error> {
-        let s4h_server = create_peer(spawner.clone(), addr.clone(), Some(1))?;
+        let s4h_server = create_peer(spawner.clone(), addr.clone(), None, Some(1))?;
         let my_peer = s4h_server.get_my_peer();
 
-        let s4h_server2 = create_peer(spawner.clone(), addr2.clone(), Some(1))?;
+        let s4h_server2 = create_peer(spawner.clone(), addr2.clone(), None, Some(1))?;
         let my_peer2 = s4h_server2.get_my_peer();
 
 
@@ -218,9 +221,9 @@ mod tests {
     }
 
     async fn basic_api_test(spawner: ThreadPool, addr: SocketAddr, addr2: SocketAddr) -> Result<(), Error> {
-        let s4h_server = create_peer(spawner.clone(), addr.clone(), Some(1))?;
+        let s4h_server = create_peer(spawner.clone(), addr.clone(), None, Some(1))?;
 
-        let s4h_server2 = create_peer(spawner.clone(), addr2.clone(), Some(1))?;
+        let s4h_server2 = create_peer(spawner.clone(), addr2.clone(), None, Some(1))?;
 
         debug!("Adding peer2 to peer1's kbuckets");
         await!(s4h_server.add_peer_by_addr(addr2.clone()));
@@ -259,9 +262,9 @@ mod tests {
 
     async fn three_peer_test(spawner: ThreadPool, addr: SocketAddr, addr2: SocketAddr, addr3: SocketAddr) -> Result<(), Error> {
 
-        let s4h_server = create_peer(spawner.clone(), addr.clone(), Some(2))?;
-        let s4h_server2 = create_peer(spawner.clone(), addr2.clone(), Some(2))?;
-        let s4h_server3 = create_peer(spawner.clone(), addr3.clone(), Some(2))?;
+        let s4h_server = create_peer(spawner.clone(), addr.clone(), None, Some(2))?;
+        let s4h_server2 = create_peer(spawner.clone(), addr2.clone(), None, Some(2))?;
+        let s4h_server3 = create_peer(spawner.clone(), addr3.clone(), None, Some(2))?;
 
         await!(s4h_server.add_peer_by_addr(addr2.clone()));
         await!(s4h_server2.add_peer_by_addr(addr3.clone()));

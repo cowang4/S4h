@@ -81,10 +81,10 @@ pub fn validate_resp(_resp: &MessageReturned) -> bool {
 
 impl S4hServer {
     
-    pub fn new(my_addr: &SocketAddr, spawner: ThreadPool) -> S4hServer {
+    pub fn new(my_addr: &SocketAddr, node_id: Option<Key>, spawner: ThreadPool) -> S4hServer {
         S4hServer {
             map: Arc::new(CHashMap::<Key, Vec<String>>::new()),
-            peer_info: Arc::new(PeerInfo::new()),
+            peer_info: Arc::new(PeerInfo::new(node_id)),
             my_addr: my_addr.clone(),
             spawner: spawner,
         }
@@ -123,7 +123,10 @@ impl S4hServer {
     async fn add_peer<'a>(&'a self, peer: &'a Peer) -> Option<Box<Client>> {
         if self.peer_info.contains(&peer.id) {
             self.peer_info.update(&peer.id);
-            return None;
+            return match self.peer_info.get(&peer.id).deref().get(&peer.id) {
+                Some(peer)  => peer.client.clone(),
+                None        => None,
+            };
         }
 
         info!("Adding peer: {}!", &peer);
@@ -140,7 +143,25 @@ impl S4hServer {
     pub async fn add_peer_by_addr<'a>(&'a self, addr: SocketAddr) -> Option<Box<Client>> {
         info!("{}: Start add_peer_by_addr: {}!", &self.my_addr, &addr);
     
-        //TODO check that that addr isn't already in the kbuckets
+        // check that that addr isn't already in the kbuckets
+        if self.peer_info.contains_addr(&addr) {
+            debug!("{}: add_peer_by_addr: contains addr {}", &self.my_addr, &addr);
+            #[allow(unused_assignments)]
+            let mut peer_id: Option<Key> = None;
+            {
+                let bucket = self.peer_info.get_peer_by_addr(&addr);
+                debug!("{}: add_peer_by_addr: got bucket", &self.my_addr);
+                let peer = bucket.deref().get_peer_by_addr(&addr).expect("peer that I just checked for");
+                peer_id = Some(peer.id.clone());
+            }
+            let peer_id = peer_id.unwrap();
+            self.peer_info.update(&peer_id);
+            debug!("{}: add_peer_by_addr: already contains {}", &self.my_addr, &addr);
+            return match self.peer_info.get(&peer_id).deref().get(&peer_id) {
+            Some(peer)  => peer.client.clone(),
+            None        => None,
+        }
+        }
 
         let transport = await!(bincode_transport::connect(&addr));
         if let Ok(transport) = transport {
@@ -265,6 +286,7 @@ impl S4hServer {
 
     /// Looks up the closest peers to key in the DHT and then sends them a store
     pub async fn store(&self, key: Key, value: String) {
+        info!("{}: Starting store.", &self.my_addr);
         let closest_peers_in_dht: Vec<Peer> = await!(self.node_lookup(key.clone()));
         let closest_peers_in_dht_len = closest_peers_in_dht.len();
         for peer in closest_peers_in_dht {

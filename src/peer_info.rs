@@ -209,6 +209,15 @@ impl KBucket {
         None
     }
 
+    pub fn get_peer_by_addr<'a>(&'a self, addr: &SocketAddr) -> Option<&'a Peer> {
+        for peer in self.iter() {
+            if peer.addr == *addr {
+                return Some(peer);
+            }
+        }
+        None
+    }
+
     pub fn iter(&self) -> linked_list::Iter<Peer> {
         self.0.iter()
     }
@@ -235,29 +244,22 @@ pub struct PeerInfo {
     pub id: Key,
 }
 
-fn create_buckets() -> Vec<RwLock<KBucket>> {
-    let mut vec = Vec::<RwLock<KBucket>>::with_capacity(KEY_SIZE_BITS);
-    for _ in 0..KEY_SIZE_BITS {
-        vec.push(RwLock::new(KBucket::new()));
-    }
-    vec
-}
 
 impl PeerInfo {
     
-    pub fn new() -> PeerInfo {
-        let id = Bytes::from(&Uuid::new_v4().as_bytes()[..]);
-        PeerInfo {
-            buckets: create_buckets(),
-            id: id,
-        }
-    }
 
-    #[allow(dead_code)]
-    pub fn with_id(k: &Key) -> PeerInfo {
+    pub fn new(k: Option<Key>) -> PeerInfo {
+        let mut vec = Vec::<RwLock<KBucket>>::with_capacity(KEY_SIZE_BITS);
+        for _ in 0..KEY_SIZE_BITS {
+            vec.push(RwLock::new(KBucket::new()));
+        }
+        let id = match k {
+            None => Bytes::from(&Uuid::new_v4().as_bytes()[..]),
+            Some(k) => k,
+        };
         PeerInfo {
-            buckets: create_buckets(),
-            id: k.clone(),
+            buckets: vec,
+            id: id,
         }
     }
 
@@ -280,15 +282,46 @@ impl PeerInfo {
         return 0;
     }
 
+    pub fn bucket_of_addr(&self, addr: &SocketAddr) -> usize {
+        for (i, bucket_locked) in self.buckets.iter().enumerate() {
+            let bucket_read = bucket_locked.read().expect("obtain kbucket read lock");
+            let bucket = bucket_read.deref();
+            for peer in bucket.iter() {
+                if *addr == peer.addr {
+                    return i;
+                }
+            }
+        }
+        return 0;
+    }
+
     pub fn get<'a>(&'a self, k: &Key) -> RwLockReadGuard<'a, KBucket> {
         let i: usize = self.bucket_of(k);
         let bucket: std::sync::RwLockReadGuard<'a, KBucket> = self.buckets[i].read().expect("obtain kbucket read lock");
         bucket
     }
 
+    pub fn get_peer_by_addr<'a>(&'a self, addr: &SocketAddr) -> RwLockReadGuard<'a, KBucket> {
+        let i: usize = self.bucket_of_addr(addr);
+        self.buckets[i].read().expect("obtain kbucket read lock")
+    }
+
     pub fn contains(&self, k: &Key) -> bool {
         let i = self.bucket_of(k);
         self.buckets[i].read().expect("obtain kbucket read lock").deref().contains(k)
+    }
+
+    pub fn contains_addr(&self, addr: &SocketAddr) -> bool {
+        for bucket_locked in self.buckets.iter() {
+            let bucket_read = bucket_locked.read().expect("obtain kbucket read lock");
+            let bucket = bucket_read.deref();
+            for peer in bucket.iter() {
+                if *addr == peer.addr {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Updates a node_id by moving it to the end of the list
@@ -435,6 +468,7 @@ impl PeerInfo {
             bucket_write.clear();
         }
     }
+
 }
 
 impl Display for PeerInfo {
@@ -532,12 +566,12 @@ mod tests {
         let k3 = Bytes::from_static(&[1; 16]); 
         let k4 = Bytes::from_static(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
         let k5 = Bytes::from_static(&[128; 16]); 
-        let p1 = PeerInfo::with_id(&k1);
+        let p1 = PeerInfo::new(Some(k1.clone()));
         assert_eq!(0, p1.bucket_of(&k1));
         assert_eq!(120, p1.bucket_of(&k3));
         assert_eq!(127, p1.bucket_of(&k2));
         assert_eq!(8, p1.bucket_of(&k4));
-        let p2 = PeerInfo::with_id(&k2);
+        let p2 = PeerInfo::new(Some(k2.clone()));
         assert_eq!(0, p2.bucket_of(&k2));
         assert_eq!(127, p2.bucket_of(&k3));
         assert_eq!(127, p2.bucket_of(&k4));
@@ -592,7 +626,7 @@ mod tests {
 
     #[test]
     fn test_peer_info_length() {
-        let pi = PeerInfo::new();
+        let pi = PeerInfo::new(None);
         assert_eq!(pi.buckets.len(), KEY_SIZE_BITS);
     }
 
