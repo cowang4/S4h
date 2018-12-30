@@ -222,6 +222,7 @@ impl KBucket {
         self.0.iter()
     }
 
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.0.clear();
     }
@@ -462,6 +463,7 @@ impl PeerInfo {
     }
 
     // clears the kbuckets, so that clients are dropped and the tests can finish
+    #[allow(dead_code)]
     pub fn clear(&self) {
         for bucket in self.buckets.iter() {
             let mut bucket_write = bucket.write().expect("obtain kbucket write lock");

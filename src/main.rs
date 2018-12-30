@@ -37,6 +37,7 @@ fn create_peer(spawner: ThreadPool, addr: SocketAddr, node_id: Option<Key>, take
     let my_peer = s4h_server.get_my_peer();
     let server_transport = bincode_transport::listen(&addr)?;
     if let Some(take_num) = take_num {
+        debug!("{}: only taking {} clients", &addr, &take_num);
         let server = server::new(server::Config::default())
             .incoming(server_transport)
             .take(take_num)
@@ -123,6 +124,8 @@ fn main() {
     // TODO fix the kbucket api, it is prone to creating deadlocks and can
     // be dangerous because in between a contains check and some get or modify,
     // the peer could be deleted.
+    // TODO make sure that everywhere that adds a peer is properly validating, with a ping
+    // TODO the CHashMap accesses have some subtle race conditions too, with contains
 
     dotenv::dotenv().expect("dotenv");
     env_logger::init();

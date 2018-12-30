@@ -18,17 +18,24 @@ use tarpc::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::key::{Key, key_fmt, key_dist, key_cmp, option_key_fmt};
+use crate::key::{Key, key_fmt, key_dist, key_cmp, option_key_fmt, key_inverse};
 use crate::peer_info::{Peer, PeerInfo, ALPHA, K};
 
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct MessageReturned {
-    pub from: Peer,                 // from peer with id
-    pub key: Option<Key>,           // key/id to store or lookup
-    pub vals: Option<Vec<String>>,  // Strings to store or lookup
-    pub peers: Option<Vec<Peer>>,   // lookup: peers that are closer to key
-    pub sig: (),                    // TODO peer's signature of above data
+    /// response from this peer
+    pub from: Peer,
+    /// key/id to store or lookup
+    pub key: Option<Key>,
+    /// Strings to store or lookup
+    pub vals: Option<Vec<String>>,
+    /// lookup: peers that are closer to key
+    pub peers: Option<Vec<Peer>>,
+    /// complaints against key, complaints submitted by key
+    pub complaints: Option<(HashSet<Key>, HashSet<Key>)>,
+    /// TODO peer's signature of above data
+    pub sig: (),
 }
 
 impl Display for MessageReturned {
@@ -45,6 +52,7 @@ impl MessageReturned {
             key: None,
             vals: None,
             peers: None,
+            complaints: None,
             sig: (),
         }
     }
@@ -52,10 +60,16 @@ impl MessageReturned {
 
 #[derive(Debug, Clone)]
 pub struct S4hServer {
+    /// Map from Content-address of search query to urls.
     map: Arc<CHashMap<Key, Vec<String>>>,
+    /// The Kad DHT's state.
     peer_info: Arc<PeerInfo>,
+    /// This server's TCP Address and Port.
     my_addr: SocketAddr,
+    /// ThreadPool to spawn futures on.
     spawner: ThreadPool,
+    /// Map from NodeID to (set of complaints against key, set of complaints submitted by key)
+    complaints: Arc<CHashMap<Key, (HashSet<Key>, HashSet<Key>)>>,
 }
 
 impl Display for S4hServer {
@@ -87,6 +101,7 @@ impl S4hServer {
             peer_info: Arc::new(PeerInfo::new(node_id)),
             my_addr: my_addr.clone(),
             spawner: spawner,
+            complaints: Arc::new(CHashMap::<Key, (HashSet<Key>, HashSet<Key>)>::new()),
         }
     }
     
@@ -291,7 +306,7 @@ impl S4hServer {
         let closest_peers_in_dht_len = closest_peers_in_dht.len();
         for peer in closest_peers_in_dht {
             if let Some(mut client) = peer.client {
-                await!(client.store(context::current(), self.get_my_peer(), (), key.clone(), value.clone()));
+                let _ = await!(client.store(context::current(), self.get_my_peer(), (), key.clone(), value.clone()));
             }
         }
         info!("{}: Finished store. Sent to {} peers.", &self.my_addr, closest_peers_in_dht_len);
@@ -317,6 +332,21 @@ impl S4hServer {
         values
     }
 
+    /// Looks up the closest peers to key in the DHT and then sends them a store_complaint_by
+    pub async fn server_store_complaint_by(&self, by: Peer, sig_by: (), against: Peer) {
+        info!("{}: Starting store_complaint_by.", &self.my_addr);
+        let inverse_by = key_inverse(&by.id);
+        let closest_peers_in_dht: Vec<Peer> = await!(self.node_lookup(inverse_by.clone()));
+        let closest_peers_in_dht_len = closest_peers_in_dht.len();
+        for peer in closest_peers_in_dht {
+            if let Some(mut client) = peer.client {
+                let _ = await!(client.store_complaint_by(context::current(), self.get_my_peer(), (), by.clone(), sig_by, against.clone()));
+            }
+        }
+        info!("{}: Finished store_complaint_by. Sent to {} peers.", &self.my_addr, closest_peers_in_dht_len);
+    }
+
+    #[allow(dead_code)]
     pub fn clear(self) {
         self.peer_info.clear();
     }
@@ -325,8 +355,11 @@ impl S4hServer {
 tarpc::service! {
     rpc ping(from: Peer, sig: ()) -> MessageReturned;
     rpc store(from: Peer, sig: (), key: Key, value: String) -> MessageReturned;
-    rpc find_node(from: Peer, sig:(), node_id: Key) -> MessageReturned;
-    rpc find_value(from: Peer, sig:(), key: Key) -> MessageReturned;
+    rpc find_node(from: Peer, sig: (), node_id: Key) -> MessageReturned;
+    rpc find_value(from: Peer, sig: (), key: Key) -> MessageReturned;
+    rpc query_complaints(from: Peer, sig: (), key: Key) -> MessageReturned;
+    rpc store_complaint_against(from: Peer, sig: (), against: Peer) -> MessageReturned;
+    rpc store_complaint_by(from: Peer, sig: (), by: Peer, sig_by: (), against: Peer) -> MessageReturned;
 }
 
 
@@ -335,6 +368,9 @@ impl Service for S4hServer {
     type StoreFut = Ready<MessageReturned>;
     type FindNodeFut = Ready<MessageReturned>;
     type FindValueFut = Ready<MessageReturned>;
+    type QueryComplaintsFut = Ready<MessageReturned>;
+    type StoreComplaintAgainstFut = Ready<MessageReturned>;
+    type StoreComplaintByFut = Ready<MessageReturned>;
 
     /// Respond if this peer is alive
     fn ping(self, _context: context::Context, from: Peer, sig: ()) -> Self::PingFut {
@@ -417,7 +453,7 @@ impl Service for S4hServer {
         let update = self.validate_and_update_or_add_peer_with_sig(from.clone(), sig);
         let valid: bool = spawner2.run(update);
         if !valid {
-            warn!("Invalid ping request from peer: {}", &from);
+            warn!("Invalid find_node request from peer: {}", &from);
         }
 
         info!("Updated Server:\n{}", self);
@@ -440,7 +476,7 @@ impl Service for S4hServer {
         let update = self.validate_and_update_or_add_peer_with_sig(from.clone(), sig);
         let valid: bool = spawner2.run(update);
         if !valid {
-            warn!("Invalid ping request from peer: {}", &from);
+            warn!("Invalid find_value request from peer: {}", &from);
         }
 
         let mut response = MessageReturned::from_peer(self.get_my_peer());
@@ -464,5 +500,121 @@ impl Service for S4hServer {
         response.peers = closest_peers;
         future::ready(response)
     }
+
+    fn query_complaints(self, _context: context::Context, from: Peer, sig: (), key: Key) -> Self::QueryComplaintsFut {
+        info!("{}: Received a query_complaints request from {} for node_id: {}", &self.my_addr, &from, &key_fmt(&key));
+
+        // Validate request
+        let mut spawner2 = self.spawner.clone();
+        let update = self.validate_and_update_or_add_peer_with_sig(from.clone(), sig);
+        let valid: bool = spawner2.run(update);
+        if !valid {
+            warn!("Invalid query_complaints request from peer: {}", &from);
+        }
+
+        let mut response = MessageReturned::from_peer(self.get_my_peer());
+        response.key = Some(key.clone());
+        response.complaints = None;
+        
+        if let Some(complaints_guard) = self.complaints.get(&key) {
+            let complaints = complaints_guard.deref().clone();
+            response.complaints = Some(complaints);
+        }
+
+        future::ready(response)
+    }
+
+    fn store_complaint_against(self, _context: context::Context, from: Peer, sig: (), against: Peer) -> Self::StoreComplaintAgainstFut {
+        info!("{}: Received a store_complaint_against request from {} against node_id: {}", &self.my_addr, &from, &key_fmt(&against.id));
+        // should be called at a node close to the inverse of against.id
+
+        // Validate request
+        let mut spawner2 = self.spawner.clone();
+        let update = self.validate_and_update_or_add_peer_with_sig(from.clone(), sig);
+        let valid: bool = spawner2.run(update);
+        if !valid {
+            warn!("Invalid file_complaint request from peer: {}", &from);
+        }
+
+        let store_by = self.server_store_complaint_by(from.clone(), sig, against.clone());
+        spawner2.run(store_by);
+        
+        if !self.complaints.contains_key(&against.id) {
+            self.complaints.insert(against.id.clone(), (HashSet::<Key>::new(), HashSet::<Key>::new()));
+        }
+        // store from.id in set of complaints against 'against'
+        if let Some(mut complaint_guard) = self.complaints.get_mut(&against.id) {
+            let complaint = complaint_guard.deref_mut();
+            complaint.0.insert(from.id.clone());
+        }
+
+        if !self.complaints.contains_key(&from.id) {
+            self.complaints.insert(from.id.clone(), (HashSet::<Key>::new(), HashSet::<Key>::new()));
+        }
+        // store 'against' in set of complaints by from.id
+        if let Some(mut complaint_guard) = self.complaints.get_mut(&from.id) {
+            let complaint = complaint_guard.deref_mut();
+            complaint.1.insert(against.id.clone());
+        }
+
+        let mut response = MessageReturned::from_peer(self.get_my_peer());
+        response.key = Some(against.id.clone());
+        response.complaints = None;
+        
+        if let Some(complaints_guard) = self.complaints.get(&against.id) {
+            let complaints = complaints_guard.deref().clone();
+            response.complaints = Some(complaints);
+        }
+
+        future::ready(response)
+    }
+
+
+    fn store_complaint_by(self, _context: context::Context, from: Peer, sig: (), by: Peer, _sig_by: (), against: Peer) -> Self::StoreComplaintByFut {
+        info!("{}: Received a store_complaint_by request from {}, by: {}, against node_id: {}", &self.my_addr, &from, &key_fmt(&by.id), &key_fmt(&against.id));
+        // should be called at a node close to the inverse of by.id
+
+        // Validate request
+        let mut spawner2 = self.spawner.clone();
+        let update = self.validate_and_update_or_add_peer_with_sig(from.clone(), sig);
+        let valid: bool = spawner2.run(update);
+        if !valid {
+            warn!("Invalid file_complaint request from peer: {}", &from);
+        }
+
+        // TODO verify that by signed this complaint against `against`
+
+
+        if !self.complaints.contains_key(&against.id) {
+            self.complaints.insert(against.id.clone(), (HashSet::<Key>::new(), HashSet::<Key>::new()));
+        }
+        // store by.id in set of complaints against 'against'
+        if let Some(mut complaint_guard) = self.complaints.get_mut(&against.id) {
+            let complaint = complaint_guard.deref_mut();
+            complaint.0.insert(by.id.clone());
+        }
+
+        if !self.complaints.contains_key(&by.id) {
+            self.complaints.insert(by.id.clone(), (HashSet::<Key>::new(), HashSet::<Key>::new()));
+        }
+        // store 'against' in set of complaints by by.id
+        if let Some(mut complaint_guard) = self.complaints.get_mut(&by.id) {
+            let complaint = complaint_guard.deref_mut();
+            complaint.1.insert(against.id.clone());
+        }
+
+
+        let mut response = MessageReturned::from_peer(self.get_my_peer());
+        response.key = Some(by.id.clone());
+        response.complaints = None;
+        
+        if let Some(complaints_guard) = self.complaints.get(&by.id) {
+            let complaints = complaints_guard.deref().clone();
+            response.complaints = Some(complaints);
+        }
+
+        future::ready(response)
+    }    
 }
+
 

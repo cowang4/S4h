@@ -34,6 +34,14 @@ pub fn key_dist(k1: &Key, k2: &Key) -> Key {
     dist.freeze()
 }
 
+pub fn key_inverse(k: &Key) -> Key {
+    let mut inv = BytesMut::with_capacity(KEY_SIZE_BYTES);
+    for b in k.iter() {
+        inv.put(!b);
+    }
+    inv.freeze()
+}
+
 pub fn key_fmt(k: &Key) -> String {
     format!("{}", hex::encode(k))
 }
