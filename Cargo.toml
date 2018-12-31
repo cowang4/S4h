@@ -5,7 +5,7 @@ authors = ["Greg Cowan <cowang4@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-bincode-transport = { package = "tarpc-bincode-transport", version = "0.3", git = "https://github.com/google/tarpc.git" }
+bincode-transport = { package = "tarpc-bincode-transport", git = "https://github.com/google/tarpc.git" }
 blake2b_simd = "0.4"
 bytes = { version = "0.4", features = ["serde"]}
 chashmap = "2.2"

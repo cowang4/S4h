@@ -20,6 +20,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::key::{Key, key_fmt, key_dist, key_cmp, option_key_fmt, key_inverse};
 use crate::peer_info::{Peer, PeerInfo, ALPHA, K};
+use crate::reputation::{WitnessReport};
+
+
+/// complaints against key, complaints submitted by key
+pub type ComplaintData = (HashSet<Key>, HashSet<Key>);
 
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -33,7 +38,7 @@ pub struct MessageReturned {
     /// lookup: peers that are closer to key
     pub peers: Option<Vec<Peer>>,
     /// complaints against key, complaints submitted by key
-    pub complaints: Option<(HashSet<Key>, HashSet<Key>)>,
+    pub complaints: Option<ComplaintData>,
     /// TODO peer's signature of above data
     pub sig: (),
 }
@@ -70,6 +75,10 @@ pub struct S4hServer {
     spawner: ThreadPool,
     /// Map from NodeID to (set of complaints against key, set of complaints submitted by key)
     complaints: Arc<CHashMap<Key, (HashSet<Key>, HashSet<Key>)>>,
+    /// the average number of complaints against a node
+    cr_avg: f32,
+    /// the average number of complaints by a node
+    cf_avg: f32,
 }
 
 impl Display for S4hServer {
@@ -102,6 +111,8 @@ impl S4hServer {
             my_addr: my_addr.clone(),
             spawner: spawner,
             complaints: Arc::new(CHashMap::<Key, (HashSet<Key>, HashSet<Key>)>::new()),
+            cr_avg: 1.0,
+            cf_avg: 1.0,
         }
     }
     
@@ -115,7 +126,8 @@ impl S4hServer {
             return false;
         }
 
-        await!(self.add_peer(&peer));
+        // await!(self.add_peer(&peer));
+        await!(self.add_peer_by_addr(peer.addr.clone()));
 
         return true;
     }
@@ -132,9 +144,6 @@ impl S4hServer {
     /// if the least-recently seen node responds, it is moved
     /// to the tail of the list, and the new sender’s contact is
     /// discarded.
-    ///
-    /// NOTE peer should be verified (by pinging that IP and checking result) before this get's
-    /// called
     async fn add_peer<'a>(&'a self, peer: &'a Peer) -> Option<Box<Client>> {
         if self.peer_info.contains(&peer.id) {
             self.peer_info.update(&peer.id);
@@ -146,6 +155,7 @@ impl S4hServer {
 
         info!("Adding peer: {}!", &peer);
         let transport = await!(bincode_transport::connect(&peer.addr)).ok()?;
+        info!("Connected to peer: {}", &peer);
         let options = client::Config::default();
         let client = await!(new_stub(options, transport)).ok()?;
         await!(self.peer_info.insert(self.get_my_peer(), peer.id.clone(), peer.addr.clone(), Box::new(client)));
@@ -155,6 +165,10 @@ impl S4hServer {
         }
     }
 
+    ///
+    /// NOTE peer should be verified (by pinging that IP and checking result) before this get's
+    /// called. Or TCP or HTTP or something needs to verify that the addr actually belongs to the
+    /// peer
     pub async fn add_peer_by_addr<'a>(&'a self, addr: SocketAddr) -> Option<Box<Client>> {
         info!("{}: Start add_peer_by_addr: {}!", &self.my_addr, &addr);
     
@@ -344,6 +358,47 @@ impl S4hServer {
             }
         }
         info!("{}: Finished store_complaint_by. Sent to {} peers.", &self.my_addr, closest_peers_in_dht_len);
+    }
+
+    /// Names from Aberer paper
+    async fn get_complaints(&self, q: Key) -> HashSet<WitnessReport> {
+        let mut res = HashSet::new();
+        let closest_peers_in_dht: Vec<Peer> = await!(self.node_lookup(q.clone()));
+        let closest_peers_in_dht_len = closest_peers_in_dht.len();
+        for peer in closest_peers_in_dht {
+            if let Some(mut client) = peer.client {
+                let query_res = await!(client.query_complaints(context::current(), self.get_my_peer(), (), q.clone())).expect("query_complaint to succeed");
+                if let Some(data) = query_res.complaints {
+                    let witness_report = WitnessReport::from_complaint_data(peer.id.clone(), data);
+                    res.insert(witness_report);
+                }
+            }
+        }
+        info!("{}: Finished get_complaints. Asked {} peers.", &self.my_addr, closest_peers_in_dht_len);
+        res
+    }
+
+    fn decide_reputation(&self, cr: usize, cf: usize) -> isize {
+        let sqr_term = (0.5 + (4.0 / (self.cr_avg * self.cf_avg).sqrt())).powi(2);
+        if cr as f32 * cf as f32 <= sqr_term * self.cr_avg * self.cf_avg {
+            1
+        } else {
+            -1
+        }
+    }
+
+    pub async fn explore_trust_simple(&self, q: Key) -> isize {
+        let w = await!(self.get_complaints(q.clone()));
+
+        // TODO update average statistics with W
+        
+        let s: isize = w.iter().map(|wr| self.decide_reputation(wr.cr, wr.cf)).sum();
+
+        match s {
+            x if x > 0  => 1,
+            x if x < 0  => -1,
+            _           => 0,
+        }
     }
 
     #[allow(dead_code)]
