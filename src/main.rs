@@ -9,62 +9,35 @@ mod rpc;
 use std::env;
 use std::io::{self, Write};
 use std::net::SocketAddr;
+use std::thread;
 
-use bincode_transport;
+use actix::prelude::*;
+use actix_web::{server, App, http};
 use dotenv;
 use failure::{Error};
-use futures::{
-    compat::{TokioDefaultSpawner},
-    future::{FutureExt, TryFutureExt},
-    executor::ThreadPool,
-    stream::{StreamExt},
-};
+use futures;
+use lazy_static::lazy_static;
 use log::{error, warn, info, debug};
-use tarpc::{
-    server::{self, Handler},
-};
-use tokio;
 
 use crate::{
     hash::hash,
     key::{key_fmt, Key},
-    rpc::{S4hServer, serve},
+    rpc::{S4hState, ping},
 };
 
 
-/// Creates a Peer and spawns a server listening at addr.
-fn create_peer(spawner: ThreadPool, addr: SocketAddr, node_id: Option<Key>, take_num: Option<u64>) -> Result<S4hServer, Error> {
-    let s4h_server = S4hServer::new(&addr, node_id, spawner);
-    let my_peer = s4h_server.get_my_peer();
-    let server_transport = bincode_transport::listen(&addr)?;
-    if let Some(take_num) = take_num {
-        debug!("{}: only taking {} clients", &addr, &take_num);
-        let server = server::new(server::Config::default())
-            .incoming(server_transport)
-            .take(take_num)
-            .respond_with(serve(s4h_server.clone()));
-
-        tokio::spawn(server.unit_error().boxed().compat());
-    } else {
-        let server = server::new(server::Config::default())
-            .incoming(server_transport)
-            .respond_with(serve(s4h_server.clone()));
-
-        tokio::spawn(server.unit_error().boxed().compat());
-    };
-
-    info!("Running server on {} with id {} ...", &my_peer.addr, key_fmt(&my_peer.id));
-
-    Ok(s4h_server)
+lazy_static! {
+    static ref S4H_STATE: S4hState = S4hState::new();
 }
 
-async fn command_line_shell(spawner: ThreadPool, addr: SocketAddr) -> Result<(), Error> {
-    let s4h_server: S4hServer = create_peer(spawner.clone(), addr, None, None)?;
+
+fn command_line_shell() {
+    let s4h_server: S4hState = S4H_STATE.clone();
     loop {
         print!("$ ");
-        io::stdout().flush()?;
+        io::stdout().flush().expect("flush stdout");
         let mut input = String::new();
-	io::stdin().read_line(&mut input)?;
+	io::stdin().read_line(&mut input).expect("read line from stdin");
 	input = input.trim().to_string();
 
         let words: Vec<&str> = input.split(" ").collect();
@@ -77,8 +50,8 @@ async fn command_line_shell(spawner: ThreadPool, addr: SocketAddr) -> Result<(),
                     error!("Usage: connect addr");
                     continue;
                 }
-                let addr: SocketAddr = words[1].parse()?;
-                await!(s4h_server.add_peer_by_addr(addr));
+                let addr: SocketAddr = words[1].parse().expect("valid addr");
+                // await!(s4h_server.add_peer_by_addr(addr));
             },
             "store" | "insert" => {
                 if words.len() != 3 {
@@ -87,7 +60,7 @@ async fn command_line_shell(spawner: ThreadPool, addr: SocketAddr) -> Result<(),
                 }
                 let key = hash(words[1].as_bytes());
                 let val = words[2].to_string();
-                await!(s4h_server.store(key, val));
+                // await!(s4h_server.store(key, val));
             },
             "find" | "lookup" | "find_val" | "find_value" => {
                 if words.len() != 2 {
@@ -95,8 +68,8 @@ async fn command_line_shell(spawner: ThreadPool, addr: SocketAddr) -> Result<(),
                     continue;
                 }
                 let key = hash(words[1].as_bytes());
-                let vals = await!(s4h_server.find_value(key));
-                println!("{:?}", vals);
+                // let vals = await!(s4h_server.find_value(key));
+                // println!("{:?}", vals);
             },
             "print" => {
                 println!("{}", &s4h_server);
@@ -110,7 +83,8 @@ async fn command_line_shell(spawner: ThreadPool, addr: SocketAddr) -> Result<(),
         }
 
     }
-    std::process::exit(0);
+    info!("Stopping s4h");
+    System::current().stop();
 }
 
 
@@ -120,8 +94,6 @@ fn main() {
     // return a Result.
     // TODO work on encapsulation. Make struct members private and helper functions
     // TODO use Arc::clone(x) instead of x.clone()
-    // TODO fix when a client drops, but client obj thinks it's connected.
-    // TODO tarpc shouldn't use systemclock for timeout, since no clock sync
     // TODO fix the kbucket api, it is prone to creating deadlocks and can
     // be dangerous because in between a contains check and some get or modify,
     // the peer could be deleted.
@@ -140,17 +112,32 @@ fn main() {
         };
         addr.parse().expect("Invalid listen addr")
     };
+    S4H_STATE.my_addr = listen_addr;
 
-    let thread_pool = ThreadPool::new().expect("Create ThreadPool");
-    tarpc::init(TokioDefaultSpawner);
-    tokio::run(
-        command_line_shell(thread_pool, listen_addr)
-            .map_err(|e| error!("ERROR: {}", e))
-            .boxed()
-            .compat()
-        );
+    let http_server = server::new(|| {
+        App::with_state(S4H_STATE.clone())
+            .resource("/ping", |r| r.method(http::Method::POST).with(ping))
+            .finish()
+    })
+    .bind(listen_addr)
+    .expect("bind server");
+
+    System::run(|| {
+        Arbiter::spawn_fn(|| {
+            thread::spawn(command_line_shell);
+
+            let my_peer = S4H_STATE.get_my_peer();
+            info!("Running server on {} with id {} ...", &my_peer.addr, key_fmt(&my_peer.id));
+
+            http_server.start();
+
+            futures::future::ok(())
+        })
+    });
 }
 
+
+/*
 
 #[cfg(test)]
 mod tests {
@@ -312,3 +299,5 @@ mod tests {
             );
     }
 }
+
+*/

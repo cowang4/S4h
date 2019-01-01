@@ -10,30 +10,19 @@ use std::ops::{Deref, DerefMut};
 use bytes::Bytes;
 use failure::{Error, format_err};
 use uuid::Uuid;
-use serde;
-use tarpc::{
-    context,
-};
+use serde_derive::{Deserialize, Serialize};
 
 use crate::key::{Key, key_cmp, key_dist, key_fmt, KEY_SIZE_BITS, KEY_SIZE_BYTES};
-use crate::rpc::{Client, validate_resp};
+use crate::rpc::{validate_resp};
 
 
 pub const K: usize = 20;    /// KBucket size parameter
 pub const ALPHA: usize = 3; /// concurrency parameter
 
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Peer {
     pub id: Key,
     pub addr: SocketAddr,
-    #[serde(skip)]
-    pub client: Option<Box<Client>>,
-}
-
-impl PartialEq for Peer {
-    fn eq(&self, other: &Peer) -> bool {
-        self.id == other.id && self.addr == other.addr
-    }
 }
 
 impl Peer {
@@ -42,7 +31,6 @@ impl Peer {
         Peer {
             id: Key::new(),
             addr: "127.0.0.1:0".parse().expect("parse default addr"),
-            client: None,
         }
     }
 
@@ -51,54 +39,19 @@ impl Peer {
         Peer {
             id: k,
             addr: "127.0.0.1:0".parse().expect("parse default addr"),
-            client: None,
-        }
-    }
-
-    pub fn get_client(&mut self) -> Result<&mut Client, Error> {
-        if let Some(boxed_client) = &mut self.client {
-            Ok(boxed_client.deref_mut())
-        }
-        else {
-            // Creating client
-            // removed async from func sig
-            // let transport = await!(bincode_transport::connect(&self.addr))?;
-            // let client = await!(new_stub(client::Config::default(), transport))?;
-            // self.client = Some(Box::new(client));
-            // Ok(self.client.expect("client just added can be returned").deref())
-            Err(format_err!("No client to return"))
-        }
-    }
-
-    pub fn clone_client(&self) -> Result<Box<Client>, Error> {
-        if let Some(boxed_client) = &self.client {
-            Ok(boxed_client.clone())
-        }
-        else {
-            Err(format_err!("No client to return"))
         }
     }
 }
 
 impl Display for Peer {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        if self.client.is_some() {
-            write!(f, "Peer: id: {}  addr: {:?}  client: Some", key_fmt(&self.id), self.addr)
-        }
-        else {
-            write!(f, "Peer: id: {}  addr: {:?}  client: None", key_fmt(&self.id), self.addr)
-        }
+        write!(f, "Peer: id: {}  addr: {:?}", key_fmt(&self.id), self.addr)
     }
 }
 
 impl Debug for Peer {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        if self.client.is_some() {
-            write!(f, "Peer: id: {}  addr: {:?}  client: Some", key_fmt(&self.id), self.addr)
-        }
-        else {
-            write!(f, "Peer: id: {}  addr: {:?}  client: None", key_fmt(&self.id), self.addr)
-        }
+        write!(f, "Peer: id: {}  addr: {:?}", key_fmt(&self.id), self.addr)
     }
 }
 
@@ -107,7 +60,6 @@ impl From<(SocketAddr, Key)> for Peer {
         Peer {
             id: tup.1,
             addr: tup.0,
-            client: None,
         }
     }
 }
@@ -341,14 +293,12 @@ impl PeerInfo {
     /// Otherwise, ping the most stale peer in that bucket,
     /// if that peer doesn't respond, drop it and the new one gets in.
     /// else, it responded, so the new one gets dropped.
-    pub async fn insert<'a>(&'a self, my_peer: Peer, k: Key, addr: SocketAddr, client: Box<Client>) {
+    pub async fn insert<'a>(&'a self, my_peer: Peer, k: Key, addr: SocketAddr) {
         
-        let mut oldest_client = None;
         let mut oldest = None;
 
         let mut peer = Peer::with_id(k.clone());
         peer.addr = addr;
-        peer.client = Some(client);
         
         // The use of the RwLockWriteGuard needs to be in a lower scope than the function
         // because it's !Send. This is a limitation of the async generator.
@@ -363,9 +313,6 @@ impl PeerInfo {
                 None        => {
                     if bucket.full() {
                         oldest = Some(bucket.pop_front().expect("full bucket has a value"));
-                        if let Ok(oldest_c) = oldest.clone().unwrap().clone_client() {
-                            oldest_client = Some(oldest_c);
-                        }
                     }
                     else {
                         bucket.push_back(peer.clone());
@@ -374,12 +321,10 @@ impl PeerInfo {
             }
         }
 
-        if let Some(mut oldest_client) = oldest_client {
+        {
             // ping oldest peer to see if it's still alive
-            // TODO this timeout stuff doesn't work.
-            let mut ping_context = context::current();
-            ping_context.deadline -= Duration::new(5, 0);
-            let ping_resp = await!(oldest_client.ping(ping_context, my_peer, ()));
+            // TODO change to actix
+            // let ping_resp = await!(oldest_client.ping(ping_context, my_peer, ()));
 
             // Re-obtain a mut ref to the bucket, because of limitation of async generator
             // See https://users.rust-lang.org/t/mutexguard-cannot-be-sent-inside-future-generator/21584
@@ -387,7 +332,8 @@ impl PeerInfo {
             let mut bucket_write = self.buckets[bucket_num].write()
                                      .expect("obtain kbucket write lock");
             let bucket = bucket_write.deref_mut();
-
+            
+            /*
             match ping_resp {
                 Ok(resp) => {
                     if validate_resp(&resp) {
@@ -396,6 +342,7 @@ impl PeerInfo {
                 },
                 Err(_) => bucket.push_back(peer),
             }
+            */
         }
 
     }
