@@ -2,23 +2,15 @@
 use std::collections::HashSet;
 use std::fmt::{self, Display, Formatter};
 use std::net::SocketAddr;
-use std::sync::{Arc};
-use std::ops::{Deref, DerefMut};
+use std::ops::{Deref};
+use std::sync::{Arc, RwLock};
 
-use bincode_transport;
 use chashmap::CHashMap;
-use futures::{
-    executor::{ThreadPool},
-    future::{self, Ready},
-};
 use log::{debug, info, warn, error};
-use tarpc::{
-    client,
-    context,
-};
-use serde::{Deserialize, Serialize};
+use serde_derive::{Deserialize, Serialize};
 
-use crate::key::{Key, key_fmt, key_dist, key_cmp, option_key_fmt, key_inverse};
+use crate::client;
+use crate::key::{Key, option_key_fmt, key_dist, key_cmp, key_fmt};
 use crate::peer_info::{Peer, PeerInfo, ALPHA, K};
 use crate::reputation::{WitnessReport};
 
@@ -64,27 +56,24 @@ impl MessageReturned {
 }
 
 #[derive(Debug, Clone)]
-pub struct S4hServer {
+pub struct S4hState {
     /// Map from Content-address of search query to urls.
-    map: Arc<CHashMap<Key, Vec<String>>>,
+    pub map: Arc<CHashMap<Key, Vec<String>>>,
     /// The Kad DHT's state.
-    peer_info: Arc<PeerInfo>,
+    pub peer_info: Arc<PeerInfo>,
     /// This server's TCP Address and Port.
-    my_addr: SocketAddr,
-    /// ThreadPool to spawn futures on.
-    spawner: ThreadPool,
+    pub my_addr: SocketAddr,
     /// Map from NodeID to (set of complaints against key, set of complaints submitted by key)
-    complaints: Arc<CHashMap<Key, (HashSet<Key>, HashSet<Key>)>>,
+    pub complaints: Arc<CHashMap<Key, (HashSet<Key>, HashSet<Key>)>>,
     /// the average number of complaints against a node
-    cr_avg: f32,
+    pub cr_avg: Arc<RwLock<f32>>,
     /// the average number of complaints by a node
-    cf_avg: f32,
+    pub cf_avg: Arc<RwLock<f32>>,
 }
 
-impl Display for S4hServer {
-    
+impl Display for S4hState {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "S4hSever:\n\tmap: {:?}\n\tmy_addr: {:?}\n\tpeer_info: {}", self.map, self.my_addr, self.peer_info)
+        write!(f, "S4hState:\n\tmap: {:?}\n\tmy_addr: {:?}\n\tpeer_info: {}", self.map, self.my_addr, self.peer_info)
     }
 }
 
@@ -102,35 +91,34 @@ pub fn validate_resp(_resp: &MessageReturned) -> bool {
 
 //TODO make a check for all arguments
 
-impl S4hServer {
+impl S4hState {
     
-    pub fn new(my_addr: &SocketAddr, node_id: Option<Key>, spawner: ThreadPool) -> S4hServer {
-        S4hServer {
+    pub fn new() -> S4hState {
+        S4hState {
             map: Arc::new(CHashMap::<Key, Vec<String>>::new()),
-            peer_info: Arc::new(PeerInfo::new(node_id)),
-            my_addr: my_addr.clone(),
-            spawner: spawner,
+            peer_info: Arc::new(PeerInfo::new(None)),
+            my_addr: "127.0.0.1:1234".parse().unwrap(),
             complaints: Arc::new(CHashMap::<Key, (HashSet<Key>, HashSet<Key>)>::new()),
-            cr_avg: 1.0,
-            cf_avg: 1.0,
+            cr_avg: Arc::new(RwLock::new(1.0)),
+            cf_avg: Arc::new(RwLock::new(1.0)),
         }
     }
     
     /// Should get a peer with each request,
     /// validate that it's either in the kbuckets, so update
     /// or add it
-    pub async fn validate_and_update_or_add_peer_with_sig(&self, peer: Peer, sig: ()) -> bool {
+    pub fn validate_and_update_or_add_peer_with_sig(&self, peer: Peer, sig: ()) -> bool {
         if validate_peer(&peer, sig) == false {
             self.peer_info.remove(&peer.id);
             error!("Peer: {} failed to validate", &peer);
             return false;
         }
 
-        // await!(self.add_peer(&peer));
-        await!(self.add_peer_by_addr(peer.addr.clone()));
+        self.add_peer_by_addr(peer.addr.clone());
 
         return true;
     }
+
 
     /// Adds a peer to the KBuckets using Kad algo:
     /// If the node is not already in the appropriate k-bucket
@@ -144,32 +132,21 @@ impl S4hServer {
     /// if the least-recently seen node responds, it is moved
     /// to the tail of the list, and the new sender’s contact is
     /// discarded.
-    async fn add_peer<'a>(&'a self, peer: &'a Peer) -> Option<Box<Client>> {
-        if self.peer_info.contains(&peer.id) {
-            self.peer_info.update(&peer.id);
-            return match self.peer_info.get(&peer.id).deref().get(&peer.id) {
-                Some(peer)  => peer.client.clone(),
-                None        => None,
-            };
-        }
-
-        info!("Adding peer: {}!", &peer);
-        let transport = await!(bincode_transport::connect(&peer.addr)).ok()?;
-        info!("Connected to peer: {}", &peer);
-        let options = client::Config::default();
-        let client = await!(new_stub(options, transport)).ok()?;
-        await!(self.peer_info.insert(self.get_my_peer(), peer.id.clone(), peer.addr.clone(), Box::new(client)));
-        match self.peer_info.get(&peer.id).deref().get(&peer.id) {
-            Some(peer)  => peer.client.clone(),
-            None        => None,
-        }
-    }
-
     ///
     /// NOTE peer should be verified (by pinging that IP and checking result) before this get's
     /// called. Or TCP or HTTP or something needs to verify that the addr actually belongs to the
     /// peer
-    pub async fn add_peer_by_addr<'a>(&'a self, addr: SocketAddr) -> Option<Box<Client>> {
+    fn add_peer<'a>(&'a self, peer: &'a Peer) {
+        if self.peer_info.contains(&peer.id) {
+            self.peer_info.update(&peer.id);
+            return;
+        }
+
+        info!("Adding peer: {}!", &peer);
+        self.peer_info.insert(self.get_my_peer(), peer.id.clone(), peer.addr.clone());
+    }
+
+    pub fn add_peer_by_addr<'a>(&'a self, addr: SocketAddr) {
         info!("{}: Start add_peer_by_addr: {}!", &self.my_addr, &addr);
     
         // check that that addr isn't already in the kbuckets
@@ -186,42 +163,24 @@ impl S4hServer {
             let peer_id = peer_id.unwrap();
             self.peer_info.update(&peer_id);
             debug!("{}: add_peer_by_addr: already contains {}", &self.my_addr, &addr);
-            return match self.peer_info.get(&peer_id).deref().get(&peer_id) {
-            Some(peer)  => peer.client.clone(),
-            None        => None,
-        }
+            return;
         }
 
-        let transport = await!(bincode_transport::connect(&addr));
-        if let Ok(transport) = transport {
-            let options = client::Config::default();
-            let client = await!(new_stub(options, transport));
-            if let Ok(mut client) = client {
-                debug!("add_peer_by_addr: created a client to {}, now pinging...", &addr);
-                let ping_resp = await!(client.ping(context::current(), self.get_my_peer(), ()));
-                if let Ok(ping_resp) = ping_resp {
-                    if validate_resp(&ping_resp) {
-                        let peer = ping_resp.from.clone();
-                        await!(self.peer_info.insert(self.get_my_peer(), peer.id.clone(), peer.addr.clone(), Box::new(client)));
-                        info!("{}: Finished add_peer_by_addr of {}", &self.my_addr, &peer);
-                        return match self.peer_info.get(&peer.id).deref().get(&peer.id) {
-                            Some(peer)  => peer.client.clone(),
-                            None        => None,
-                        };
-                    }
-                }
+        let ping_resp = client::ping(addr, self.get_my_peer());
+        if let Ok(ping_resp) = ping_resp {
+            if validate_resp(&ping_resp) {
+                let peer = ping_resp.from.clone();
+                self.peer_info.insert(self.get_my_peer(), peer.id.clone(), peer.addr.clone());
+                info!("{}: Finished add_peer_by_addr of {}", &self.my_addr, &peer);
             }
-        } else {
-            warn!("{}: Couldn't add_peer_by_addr for {}. Error: {:?}", &self.my_addr, &addr, transport);
         }
-        None
     }
 
     pub fn get_my_peer(&self) -> Peer {
         Peer::from((self.my_addr, self.peer_info.id.clone()))
     }
 
-    pub async fn node_lookup<'a>(&'a self, key: Key) -> Vec<Peer> {
+    pub fn node_lookup<'a>(&'a self, key: Key) -> Vec<Peer> {
         info!("{}: Starting node lookup of {}", &self.my_addr, &key_fmt(&key));
         // will be filled with IDs of nodes that have been asked
         let mut queried = HashSet::<Key>::new();
@@ -257,24 +216,23 @@ impl S4hServer {
             for peer_tup in to_query {
                 // mark this peer as queried so we don't ask it again
                 queried.insert(peer_tup.1.id.clone());
-                let mut peer_client = peer_tup.1.client.clone().expect("client");
+                let peer_addr = peer_tup.1.addr.clone();
                 // TODO do this asyncly
                 // call find_node on that peer
-                let find_node_resp: Result<MessageReturned, std::io::Error> = await!(peer_client.find_node(context::current(), self.get_my_peer(), (), key.clone()));
+                let find_node_resp = client::find_node(peer_addr, self.get_my_peer(), key.clone());
                 debug!("find_node returned: {:?}", &find_node_resp);
                 if let Ok(find_node_resp) = find_node_resp {
                     // TODO do this asyncly
                     // validate the response, and update our kbuckets
-                    let valid: bool = await!(self.validate_and_update_or_add_peer_with_sig(find_node_resp.from.clone(), find_node_resp.sig.clone()));
+                    let valid: bool = self.validate_and_update_or_add_peer_with_sig(find_node_resp.from.clone(), find_node_resp.sig.clone());
                     if !valid {
                         continue;
                     }
                     if let Some(peers) = find_node_resp.peers {
-                        for mut peer in peers {
+                        for peer in peers {
                             // check that this node isn't us
                             if peer.id != self.peer_info.id {
-                                let optional_client: Option<Box<Client>> = await!(self.add_peer(&peer));
-                                peer.client = optional_client;
+                                self.add_peer(&peer);
                                 next_closest_peers.push((key_dist(&key, &peer.id), peer));
                             }
                         }
@@ -313,31 +271,28 @@ impl S4hServer {
         closest_peers.iter().map(|p| p.1.clone()).collect()
     }
 
+
     /// Looks up the closest peers to key in the DHT and then sends them a store
-    pub async fn store(&self, key: Key, value: String) {
+    pub fn store(&self, key: Key, value: String) {
         info!("{}: Starting store.", &self.my_addr);
-        let closest_peers_in_dht: Vec<Peer> = await!(self.node_lookup(key.clone()));
+        let closest_peers_in_dht: Vec<Peer> = self.node_lookup(key.clone());
         let closest_peers_in_dht_len = closest_peers_in_dht.len();
         for peer in closest_peers_in_dht {
-            if let Some(mut client) = peer.client {
-                let _ = await!(client.store(context::current(), self.get_my_peer(), (), key.clone(), value.clone()));
-            }
+            let _ = client::store(peer.addr, self.get_my_peer(), key.clone(), value.clone());
         }
         info!("{}: Finished store. Sent to {} peers.", &self.my_addr, closest_peers_in_dht_len);
     }
 
-    pub async fn find_value(&self, key: Key) -> Vec<String> {
-        let closest_peers_in_dht: Vec<Peer> = await!(self.node_lookup(key.clone()));
+    pub fn find_value(&self, key: Key) -> Vec<String> {
+        let closest_peers_in_dht: Vec<Peer> = self.node_lookup(key.clone());
         let mut values = Vec::new();
         for peer in closest_peers_in_dht {
-            if let Some(mut client) = peer.client {
-                let find_val_resp: Option<MessageReturned> = await!(client.find_value(context::current(), self.get_my_peer(), (), key.clone())).ok();
-                if let Some(find_val_resp) = find_val_resp {
-                    if let Some(resp_vals) = find_val_resp.vals {
-                        for value in resp_vals {
-                            if !values.contains(&value) {
-                                values.push(value);
-                            }
+            let find_val_resp: Option<MessageReturned> = client::find_value(peer.addr, self.get_my_peer(), key.clone()).ok();
+            if let Some(find_val_resp) = find_val_resp {
+                if let Some(resp_vals) = find_val_resp.vals {
+                    for value in resp_vals {
+                        if !values.contains(&value) {
+                            values.push(value);
                         }
                     }
                 }
@@ -346,32 +301,30 @@ impl S4hServer {
         values
     }
 
+
+    /*
     /// Looks up the closest peers to key in the DHT and then sends them a store_complaint_by
-    pub async fn server_store_complaint_by(&self, by: Peer, sig_by: (), against: Peer) {
+    pub fn store_complaint_by(&self, by: Peer, sig_by: (), against: Peer) {
         info!("{}: Starting store_complaint_by.", &self.my_addr);
         let inverse_by = key_inverse(&by.id);
-        let closest_peers_in_dht: Vec<Peer> = await!(self.node_lookup(inverse_by.clone()));
+        let closest_peers_in_dht: Vec<Peer> = self.node_lookup(inverse_by.clone());
         let closest_peers_in_dht_len = closest_peers_in_dht.len();
         for peer in closest_peers_in_dht {
-            if let Some(mut client) = peer.client {
-                let _ = await!(client.store_complaint_by(context::current(), self.get_my_peer(), (), by.clone(), sig_by, against.clone()));
-            }
+            let _ = client::store_complaint_by(peer.addr, self.get_my_peer(), by.clone(), sig_by, against.clone()));
         }
         info!("{}: Finished store_complaint_by. Sent to {} peers.", &self.my_addr, closest_peers_in_dht_len);
     }
 
     /// Names from Aberer paper
-    async fn get_complaints(&self, q: Key) -> HashSet<WitnessReport> {
+    fn get_complaints(&self, q: Key) -> HashSet<WitnessReport> {
         let mut res = HashSet::new();
-        let closest_peers_in_dht: Vec<Peer> = await!(self.node_lookup(q.clone()));
+        let closest_peers_in_dht: Vec<Peer> = self.node_lookup(q.clone());
         let closest_peers_in_dht_len = closest_peers_in_dht.len();
         for peer in closest_peers_in_dht {
-            if let Some(mut client) = peer.client {
-                let query_res = await!(client.query_complaints(context::current(), self.get_my_peer(), (), q.clone())).expect("query_complaint to succeed");
-                if let Some(data) = query_res.complaints {
-                    let witness_report = WitnessReport::from_complaint_data(peer.id.clone(), data);
-                    res.insert(witness_report);
-                }
+            let query_res = client::query_complaints(peer.addr, self.get_my_peer(), q.clone()).expect("query_complaint to succeed");
+            if let Some(data) = query_res.complaints {
+                let witness_report = WitnessReport::from_complaint_data(peer.id.clone(), data);
+                res.insert(witness_report);
             }
         }
         info!("{}: Finished get_complaints. Asked {} peers.", &self.my_addr, closest_peers_in_dht_len);
@@ -387,8 +340,8 @@ impl S4hServer {
         }
     }
 
-    pub async fn explore_trust_simple(&self, q: Key) -> isize {
-        let w = await!(self.get_complaints(q.clone()));
+    pub fn explore_trust_simple(&self, q: Key) -> isize {
+        let w = self.get_complaints(q.clone());
 
         // TODO update average statistics with W
         
@@ -400,276 +353,12 @@ impl S4hServer {
             _           => 0,
         }
     }
+    */
 
     #[allow(dead_code)]
     pub fn clear(self) {
         self.peer_info.clear();
     }
-}
-
-tarpc::service! {
-    rpc ping(from: Peer, sig: ()) -> MessageReturned;
-    rpc store(from: Peer, sig: (), key: Key, value: String) -> MessageReturned;
-    rpc find_node(from: Peer, sig: (), node_id: Key) -> MessageReturned;
-    rpc find_value(from: Peer, sig: (), key: Key) -> MessageReturned;
-    rpc query_complaints(from: Peer, sig: (), key: Key) -> MessageReturned;
-    rpc store_complaint_against(from: Peer, sig: (), against: Peer) -> MessageReturned;
-    rpc store_complaint_by(from: Peer, sig: (), by: Peer, sig_by: (), against: Peer) -> MessageReturned;
-}
-
-
-impl Service for S4hServer {
-    type PingFut = Ready<MessageReturned>;
-    type StoreFut = Ready<MessageReturned>;
-    type FindNodeFut = Ready<MessageReturned>;
-    type FindValueFut = Ready<MessageReturned>;
-    type QueryComplaintsFut = Ready<MessageReturned>;
-    type StoreComplaintAgainstFut = Ready<MessageReturned>;
-    type StoreComplaintByFut = Ready<MessageReturned>;
-
-    /// Respond if this peer is alive
-    fn ping(self, _context: context::Context, from: Peer, sig: ()) -> Self::PingFut {
-        info!("{}: Received a ping request from {}", &self.my_addr, &from);
-        
-        // Validate request
-        let mut spawner2 = self.spawner.clone();
-        let update = self.validate_and_update_or_add_peer_with_sig(from.clone(), sig);
-        let valid: bool = spawner2.run(update);
-        if !valid {
-            warn!("Invalid ping request from peer: {}", &from);
-        }
-
-        info!("Updated Server:\n{}", self);
-
-        info!("{}: Finished a ping request from {}", &self.my_addr, &from);
-        let response = MessageReturned::from_peer(self.get_my_peer());
-        future::ready(response)
-    }
-
-    /// Store this pair in the HashTable
-    /// pair: (Key, URL)
-    fn store(self, _context: context::Context, from: Peer, sig: (), key: Key, value: String) -> Self::StoreFut {
-        info!("{}: Received a store request from {}", &self.my_addr, &from);
-
-        // validate request
-        let mut spawner2 = self.spawner.clone();
-        let update = self.validate_and_update_or_add_peer_with_sig(from.clone(), sig);
-        let valid: bool = spawner2.run(update);
-        if !valid {
-            warn!("Invalid store request from peer: {:?}", &from);
-        }
-
-        // Store in hash table
-        if self.map.contains_key(&key) {
-            // check for value, don't want duplicates of the same string value.
-            if !self.map.get(&key).unwrap().deref().contains(&value) {
-                info!("Pushing back value: {}", &value);
-                self.map.get_mut(&key).unwrap().deref_mut().push(value.clone());
-            }
-            else {
-                info!("Map already contains value: {}", &value);
-            }
-        }
-        else {
-            info!("Insert_new key: {} with value: {}", key_fmt(&key), &value);
-            self.map.insert_new(key.clone(), vec![value.clone()]);
-        }
-
-        let closer_peers = self.peer_info.closer_k_peers(key.clone());
-        if closer_peers.is_some() {
-            info!("{} closer peers to key: {}", closer_peers.as_ref().unwrap().len(), &key_fmt(&key));
-        }
-
-        info!("Updated Server:\n{}", self);
-        info!("{}: Finished a store request from {}", &self.my_addr, &from);
-
-        // build response
-        let mut response = MessageReturned::from_peer(self.get_my_peer());
-        response.key = Some(key.clone());
-        match self.map.get(&key) {
-            Some(values) => {
-                response.vals = Some(values.deref().clone());
-            },
-            None => {
-                response.vals = None;
-            }
-        }
-        response.peers = closer_peers;
-        future::ready(response)
-    }
-
-    /// Find a node by it's ID
-    /// Iterative, so just returns a list of closer peers.
-    fn find_node(self, _context: context::Context, from: Peer, sig: (), node_id: Key) -> Self::FindNodeFut {
-        info!("{}: Received a find node request from {} for node_id: {}", &self.my_addr, &from, &key_fmt(&node_id));
-
-        // Validate request
-        let mut spawner2 = self.spawner.clone();
-        let update = self.validate_and_update_or_add_peer_with_sig(from.clone(), sig);
-        let valid: bool = spawner2.run(update);
-        if !valid {
-            warn!("Invalid find_node request from peer: {}", &from);
-        }
-
-        info!("Updated Server:\n{}", self);
-
-        let closest_peers = self.peer_info.closest_k_peers(node_id.clone());
-        info!("{}: Finished a find node request from {} for node_id: {}", &self.my_addr, &from, &key_fmt(&node_id));
-        let mut response = MessageReturned::from_peer(self.get_my_peer());
-        response.key = Some(node_id);
-        response.peers = closest_peers;
-        info!("Actually done find_node now...");
-        future::ready(response)
-    }
-
-    /// Find a value by it's key
-    fn find_value(self, _context: context::Context, from: Peer, sig: (), key: Key) -> Self::FindValueFut {
-        info!("{}: Received a find value request from {} for key: {}", &self.my_addr, &from, &key_fmt(&key));
-
-        // Validate request
-        let mut spawner2 = self.spawner.clone();
-        let update = self.validate_and_update_or_add_peer_with_sig(from.clone(), sig);
-        let valid: bool = spawner2.run(update);
-        if !valid {
-            warn!("Invalid find_value request from peer: {}", &from);
-        }
-
-        let mut response = MessageReturned::from_peer(self.get_my_peer());
-        response.key = Some(key.clone());
-
-        // Lookup values
-        match self.map.get(&key) {
-            Some(values) => {
-                info!("Found key: {} in store", &key_fmt(&key));
-                response.vals = Some(values.deref().clone());
-            },
-            None => {
-                info!("Didn't found key: {} in store", &key_fmt(&key));
-                response.vals = None;
-            }
-        }
-
-        info!("Updated Server:\n{}", self);
-
-        let closest_peers = self.peer_info.closest_k_peers(key.clone());
-        response.peers = closest_peers;
-        future::ready(response)
-    }
-
-    fn query_complaints(self, _context: context::Context, from: Peer, sig: (), key: Key) -> Self::QueryComplaintsFut {
-        info!("{}: Received a query_complaints request from {} for node_id: {}", &self.my_addr, &from, &key_fmt(&key));
-
-        // Validate request
-        let mut spawner2 = self.spawner.clone();
-        let update = self.validate_and_update_or_add_peer_with_sig(from.clone(), sig);
-        let valid: bool = spawner2.run(update);
-        if !valid {
-            warn!("Invalid query_complaints request from peer: {}", &from);
-        }
-
-        let mut response = MessageReturned::from_peer(self.get_my_peer());
-        response.key = Some(key.clone());
-        response.complaints = None;
-        
-        if let Some(complaints_guard) = self.complaints.get(&key) {
-            let complaints = complaints_guard.deref().clone();
-            response.complaints = Some(complaints);
-        }
-
-        future::ready(response)
-    }
-
-    fn store_complaint_against(self, _context: context::Context, from: Peer, sig: (), against: Peer) -> Self::StoreComplaintAgainstFut {
-        info!("{}: Received a store_complaint_against request from {} against node_id: {}", &self.my_addr, &from, &key_fmt(&against.id));
-        // should be called at a node close to the inverse of against.id
-
-        // Validate request
-        let mut spawner2 = self.spawner.clone();
-        let update = self.validate_and_update_or_add_peer_with_sig(from.clone(), sig);
-        let valid: bool = spawner2.run(update);
-        if !valid {
-            warn!("Invalid file_complaint request from peer: {}", &from);
-        }
-
-        let store_by = self.server_store_complaint_by(from.clone(), sig, against.clone());
-        spawner2.run(store_by);
-        
-        if !self.complaints.contains_key(&against.id) {
-            self.complaints.insert(against.id.clone(), (HashSet::<Key>::new(), HashSet::<Key>::new()));
-        }
-        // store from.id in set of complaints against 'against'
-        if let Some(mut complaint_guard) = self.complaints.get_mut(&against.id) {
-            let complaint = complaint_guard.deref_mut();
-            complaint.0.insert(from.id.clone());
-        }
-
-        if !self.complaints.contains_key(&from.id) {
-            self.complaints.insert(from.id.clone(), (HashSet::<Key>::new(), HashSet::<Key>::new()));
-        }
-        // store 'against' in set of complaints by from.id
-        if let Some(mut complaint_guard) = self.complaints.get_mut(&from.id) {
-            let complaint = complaint_guard.deref_mut();
-            complaint.1.insert(against.id.clone());
-        }
-
-        let mut response = MessageReturned::from_peer(self.get_my_peer());
-        response.key = Some(against.id.clone());
-        response.complaints = None;
-        
-        if let Some(complaints_guard) = self.complaints.get(&against.id) {
-            let complaints = complaints_guard.deref().clone();
-            response.complaints = Some(complaints);
-        }
-
-        future::ready(response)
-    }
-
-
-    fn store_complaint_by(self, _context: context::Context, from: Peer, sig: (), by: Peer, _sig_by: (), against: Peer) -> Self::StoreComplaintByFut {
-        info!("{}: Received a store_complaint_by request from {}, by: {}, against node_id: {}", &self.my_addr, &from, &key_fmt(&by.id), &key_fmt(&against.id));
-        // should be called at a node close to the inverse of by.id
-
-        // Validate request
-        let mut spawner2 = self.spawner.clone();
-        let update = self.validate_and_update_or_add_peer_with_sig(from.clone(), sig);
-        let valid: bool = spawner2.run(update);
-        if !valid {
-            warn!("Invalid file_complaint request from peer: {}", &from);
-        }
-
-        // TODO verify that by signed this complaint against `against`
-
-
-        if !self.complaints.contains_key(&against.id) {
-            self.complaints.insert(against.id.clone(), (HashSet::<Key>::new(), HashSet::<Key>::new()));
-        }
-        // store by.id in set of complaints against 'against'
-        if let Some(mut complaint_guard) = self.complaints.get_mut(&against.id) {
-            let complaint = complaint_guard.deref_mut();
-            complaint.0.insert(by.id.clone());
-        }
-
-        if !self.complaints.contains_key(&by.id) {
-            self.complaints.insert(by.id.clone(), (HashSet::<Key>::new(), HashSet::<Key>::new()));
-        }
-        // store 'against' in set of complaints by by.id
-        if let Some(mut complaint_guard) = self.complaints.get_mut(&by.id) {
-            let complaint = complaint_guard.deref_mut();
-            complaint.1.insert(against.id.clone());
-        }
-
-
-        let mut response = MessageReturned::from_peer(self.get_my_peer());
-        response.key = Some(by.id.clone());
-        response.complaints = None;
-        
-        if let Some(complaints_guard) = self.complaints.get(&by.id) {
-            let complaints = complaints_guard.deref().clone();
-            response.complaints = Some(complaints);
-        }
-
-        future::ready(response)
-    }    
 }
 
 
