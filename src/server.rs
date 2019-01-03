@@ -1,5 +1,6 @@
 
 
+use std::collections::{HashSet};
 use std::ops::{Deref, DerefMut};
 
 use actix_web::{App, http, HttpRequest, Json};
@@ -8,7 +9,7 @@ use serde_derive::{Deserialize, Serialize};
 
 use crate::{
     key::{key_fmt, Key},
-    rpc::{S4hState, MessageReturned, validate_peer},
+    state::{S4hState, MessageReturned, validate_peer},
     peer_info::{Peer},
 };
 
@@ -19,6 +20,9 @@ pub fn create_app(state: S4hState) -> App<S4hState> {
         .resource("/store",         |r| r.method(http::Method::POST).with(store))
         .resource("/find_node",     |r| r.method(http::Method::POST).with(find_node))
         .resource("/find_value",    |r| r.method(http::Method::POST).with(find_value))
+        .resource("/query_complaints",          |r| r.method(http::Method::POST).with(query_complaints))
+        .resource("/store_complaint_against",   |r| r.method(http::Method::POST).with(store_complaint_against))
+        .resource("/store_complaint_by",        |r| r.method(http::Method::POST).with(store_complaint_by))
 }
 
 
@@ -203,7 +207,7 @@ pub fn query_complaints((req, args): (HttpRequest<S4hState>, Json<QueryComplaint
     response.key = Some(args.key.clone());
     response.complaints = None;
     
-    if let Some(complaints_guard) = self.complaints.get(&args.key) {
+    if let Some(complaints_guard) = state.complaints.get(&args.key) {
         let complaints = complaints_guard.deref().clone();
         response.complaints = Some(complaints);
     }
@@ -220,7 +224,7 @@ pub struct StoreComplaintAgainstArgs {
 }
 
 /// should be called at a node close to the inverse of against.id
-pub fn store_complaint_against((req, args): (HttpRequest<S4hState>, Json<StoreComplaintAgainstArgs)) -> Json<MessageReturned> {
+pub fn store_complaint_against((req, args): (HttpRequest<S4hState>, Json<StoreComplaintAgainstArgs>)) -> Json<MessageReturned> {
     let state = req.state();
     info!("{}: Received a store_complaint_against request from {} against node_id: {}", &state.my_addr, &args.from, &key_fmt(&args.against.id));
 
@@ -233,13 +237,13 @@ pub fn store_complaint_against((req, args): (HttpRequest<S4hState>, Json<StoreCo
         return Json(response);
     }
 
-    let store_by = state.store_complaint_by(args.from.clone(), args.sig, args.against.clone());
+    let _store_by = state.store_complaint_by(args.from.clone(), args.sig, args.against.clone());
     
     if !state.complaints.contains_key(&args.against.id) {
         state.complaints.insert(args.against.id.clone(), (HashSet::<Key>::new(), HashSet::<Key>::new()));
     }
     // store from.id in set of complaints against 'against'
-    if let Some(mut complaint_guard) = self.complaints.get_mut(&args.against.id) {
+    if let Some(mut complaint_guard) = state.complaints.get_mut(&args.against.id) {
         let complaint = complaint_guard.deref_mut();
         complaint.0.insert(args.from.id.clone());
     }
@@ -248,7 +252,7 @@ pub fn store_complaint_against((req, args): (HttpRequest<S4hState>, Json<StoreCo
         state.complaints.insert(args.from.id.clone(), (HashSet::<Key>::new(), HashSet::<Key>::new()));
     }
     // store 'against' in set of complaints by from.id
-    if let Some(mut complaint_guard) = self.complaints.get_mut(&args.from.id) {
+    if let Some(mut complaint_guard) = state.complaints.get_mut(&args.from.id) {
         let complaint = complaint_guard.deref_mut();
         complaint.1.insert(args.against.id.clone());
     }
@@ -256,7 +260,7 @@ pub fn store_complaint_against((req, args): (HttpRequest<S4hState>, Json<StoreCo
     response.key = Some(args.against.id.clone());
     response.complaints = None;
     
-    if let Some(complaints_guard) = self.complaints.get(&args.against.id) {
+    if let Some(complaints_guard) = state.complaints.get(&args.against.id) {
         let complaints = complaints_guard.deref().clone();
         response.complaints = Some(complaints);
     }
@@ -274,7 +278,7 @@ pub struct StoreComplaintByArgs {
     pub sig: (),
 }
 
-pub fn store_complaint_by((req, args): (HttpRequest<S4hState>, Json<StoreComplaintByArgs)) -> Json<MessageReturned> {
+pub fn store_complaint_by((req, args): (HttpRequest<S4hState>, Json<StoreComplaintByArgs>)) -> Json<MessageReturned> {
     let state = req.state();
     info!("{}: Received a store_complaint_by request from {}, by: {}, against node_id: {}", &state.my_addr, &args.from, &key_fmt(&args.by.id), &key_fmt(&args.against.id));
     // should be called at a node close to the inverse of by.id
@@ -288,7 +292,7 @@ pub fn store_complaint_by((req, args): (HttpRequest<S4hState>, Json<StoreComplai
         return Json(response);
     }
 
-    // TODO verify that by signed this complaint against `against`
+    // TODO verify that 'by' signed this complaint against `against`
 
     if !state.complaints.contains_key(&args.against.id) {
         state.complaints.insert(args.against.id.clone(), (HashSet::<Key>::new(), HashSet::<Key>::new()));
@@ -299,24 +303,24 @@ pub fn store_complaint_by((req, args): (HttpRequest<S4hState>, Json<StoreComplai
         complaint.0.insert(args.by.id.clone());
     }
 
-    if !state.complaints.contains_key(&by.id) {
-        state.complaints.insert(by.id.clone(), (HashSet::<Key>::new(), HashSet::<Key>::new()));
+    if !state.complaints.contains_key(&args.by.id) {
+        state.complaints.insert(args.by.id.clone(), (HashSet::<Key>::new(), HashSet::<Key>::new()));
     }
     // store 'against' in set of complaints by by.id
-    if let Some(mut complaint_guard) = self.complaints.get_mut(&by.id) {
+    if let Some(mut complaint_guard) = state.complaints.get_mut(&args.by.id) {
         let complaint = complaint_guard.deref_mut();
-        complaint.1.insert(against.id.clone());
+        complaint.1.insert(args.against.id.clone());
     }
 
 
-    response.key = Some(by.id.clone());
+    response.key = Some(args.by.id.clone());
     response.complaints = None;
     
-    if let Some(complaints_guard) = self.complaints.get(&by.id) {
+    if let Some(complaints_guard) = state.complaints.get(&args.by.id) {
         let complaints = complaints_guard.deref().clone();
         response.complaints = Some(complaints);
     }
 
-    future::ready(response)
+    Json(response)
 }    
 

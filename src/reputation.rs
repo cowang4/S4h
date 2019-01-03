@@ -1,6 +1,9 @@
 
 
-use crate::{key::Key, rpc::{ComplaintData}};
+use crate::{
+    key::Key,
+    state::{ComplaintData},
+};
 
 
 #[derive(Debug, PartialEq, Eq, Hash)]

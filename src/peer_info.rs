@@ -12,7 +12,7 @@ use serde_derive::{Deserialize, Serialize};
 
 use crate::client;
 use crate::key::{Key, key_cmp, key_dist, key_fmt, KEY_SIZE_BITS, KEY_SIZE_BYTES};
-use crate::rpc::{validate_resp};
+use crate::state::{validate_resp};
 
 
 pub const K: usize = 20;    /// KBucket size parameter
@@ -26,6 +26,7 @@ pub struct Peer {
 
 impl Peer {
 
+    #[allow(dead_code)]
     pub fn new() -> Peer {
         Peer {
             id: Key::new(),
@@ -33,7 +34,6 @@ impl Peer {
         }
     }
 
-    #[allow(dead_code)]
     pub fn with_id(k: Key) -> Peer {
         Peer {
             id: k,
@@ -200,6 +200,7 @@ pub struct PeerInfo {
 impl PeerInfo {
     
 
+    #[allow(dead_code)]
     pub fn new(k: Option<Key>) -> PeerInfo {
         let mut vec = Vec::<RwLock<KBucket>>::with_capacity(KEY_SIZE_BITS);
         for _ in 0..KEY_SIZE_BITS {

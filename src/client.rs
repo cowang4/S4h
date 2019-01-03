@@ -8,8 +8,8 @@ use reqwest;
 
 use crate::{
     key::{Key},
-    rpc::{MessageReturned},
-    server::{PingArgs, StoreArgs, FindNodeArgs, FindValueArgs},
+    server::{PingArgs, StoreArgs, FindNodeArgs, FindValueArgs, QueryComplaintsArgs, StoreComplaintByArgs, StoreComplaintAgainstArgs},
+    state::{MessageReturned},
     peer_info::{Peer},
 };
 
@@ -57,12 +57,25 @@ pub fn find_value(to_addr: SocketAddr, from: Peer, key: Key) -> Result<MessageRe
 }
 
 
-/*
 pub fn query_complaints(to_addr: SocketAddr, from: Peer, key: Key) -> Result<MessageReturned, reqwest::Error> {
-    CLIENT.post(&format("{}/query_complaints", to_addr))
-        .json(&QueryComplaintsArgs{ from: from, key: Key, sig: () })
+    CLIENT.post(&format!("http://{}/query_complaints", to_addr))
+        .json(&QueryComplaintsArgs{ from: from, key: key, sig: () })
         .send()?
         .json()
 }
 
-*/
+
+pub fn store_complaint_by(to_addr: SocketAddr, from: Peer, by: Peer, sig_by: (), against: Peer) -> Result<MessageReturned, reqwest::Error> {
+    CLIENT.post(&format!("http://{}/store_complaint_by", to_addr))
+        .json(&StoreComplaintByArgs{ from: from, by: by, sig_by: sig_by, against: against, sig: () })
+        .send()?
+        .json()
+}
+
+
+pub fn store_complaint_against(to_addr: SocketAddr, from: Peer, against: Peer) -> Result<MessageReturned, reqwest::Error> {
+    CLIENT.post(&format!("http://{}/store_complaint_against", to_addr))
+        .json(&StoreComplaintAgainstArgs{ from: from, against: against, sig: () })
+        .send()?
+        .json()
+}

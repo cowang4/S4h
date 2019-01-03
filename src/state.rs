@@ -10,7 +10,7 @@ use log::{debug, info, warn, error};
 use serde_derive::{Deserialize, Serialize};
 
 use crate::client;
-use crate::key::{Key, option_key_fmt, key_dist, key_cmp, key_fmt};
+use crate::key::{Key, option_key_fmt, key_dist, key_cmp, key_fmt, key_inverse};
 use crate::peer_info::{Peer, PeerInfo, ALPHA, K};
 use crate::reputation::{WitnessReport};
 
@@ -302,18 +302,38 @@ impl S4hState {
     }
 
 
-    /*
-    /// Looks up the closest peers to key in the DHT and then sends them a store_complaint_by
+    /// Looks up the closest peers to against in the DHT and then sends them a store_complaint_against
+    pub fn store_complaint_against(&self, against: Key) {
+        info!("{}: Starting store_complaint_against.", &self.my_addr);
+        let against_bucket = self.peer_info.get(&against);
+        let against_peer = against_bucket.deref().get(&against);
+        if against_peer.is_none() {
+            error!("Peer not known with key: {}", &key_fmt(&against));
+            return;
+        }
+        let against_peer = against_peer.unwrap();
+        let inverse_by = key_inverse(&against);
+        let closest_peers_in_dht: Vec<Peer> = self.node_lookup(inverse_by.clone());
+        let closest_peers_in_dht_len = closest_peers_in_dht.len();
+        for peer in closest_peers_in_dht {
+            let _ = client::store_complaint_against(peer.addr, self.get_my_peer(), against_peer.clone());
+        }
+        info!("{}: Finished store_complaint_against. Sent to {} peers.", &self.my_addr, closest_peers_in_dht_len);
+    }
+
+
+    /// Looks up the closest peers to against.addr in the DHT and then sends them a store_complaint_by
     pub fn store_complaint_by(&self, by: Peer, sig_by: (), against: Peer) {
         info!("{}: Starting store_complaint_by.", &self.my_addr);
         let inverse_by = key_inverse(&by.id);
         let closest_peers_in_dht: Vec<Peer> = self.node_lookup(inverse_by.clone());
         let closest_peers_in_dht_len = closest_peers_in_dht.len();
         for peer in closest_peers_in_dht {
-            let _ = client::store_complaint_by(peer.addr, self.get_my_peer(), by.clone(), sig_by, against.clone()));
+            let _ = client::store_complaint_by(peer.addr, self.get_my_peer(), by.clone(), sig_by, against.clone());
         }
         info!("{}: Finished store_complaint_by. Sent to {} peers.", &self.my_addr, closest_peers_in_dht_len);
     }
+
 
     /// Names from Aberer paper
     fn get_complaints(&self, q: Key) -> HashSet<WitnessReport> {
@@ -331,14 +351,18 @@ impl S4hState {
         res
     }
 
+
     fn decide_reputation(&self, cr: usize, cf: usize) -> isize {
-        let sqr_term = (0.5 + (4.0 / (self.cr_avg * self.cf_avg).sqrt())).powi(2);
-        if cr as f32 * cf as f32 <= sqr_term * self.cr_avg * self.cf_avg {
+        let cr_avg = self.cr_avg.read().unwrap();
+        let cf_avg = self.cf_avg.read().unwrap();
+        let sqr_term = (0.5 + (4.0 / (*cr_avg * *cf_avg).sqrt())).powi(2);
+        if cr as f32 * cf as f32 <= sqr_term * *cr_avg * *cf_avg {
             1
         } else {
             -1
         }
     }
+
 
     pub fn explore_trust_simple(&self, q: Key) -> isize {
         let w = self.get_complaints(q.clone());
@@ -353,7 +377,6 @@ impl S4hState {
             _           => 0,
         }
     }
-    */
 
     #[allow(dead_code)]
     pub fn clear(self) {

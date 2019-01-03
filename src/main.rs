@@ -4,8 +4,8 @@ mod hash;
 mod key;
 mod peer_info;
 mod reputation;
-mod rpc;
 mod server;
+mod state;
 
 use std::env;
 use std::io::{self, Write};
@@ -25,9 +25,9 @@ use log::{error, warn, info, debug};
 
 use crate::{
     hash::hash,
-    key::{key_fmt},
-    rpc::{S4hState},
-    server::{create_app}
+    key::{key_fmt, key_new},
+    server::{create_app},
+    state::{S4hState},
 };
 
 
@@ -70,6 +70,22 @@ fn command_line_shell(s4h_state: S4hState, done: Arc<AtomicBool>) {
                 let vals = s4h_state.find_value(key);
                 println!("{:?}", vals);
             },
+            "complain" => {
+                if words.len() != 2 {
+                    error!("Usage: {} against_node_id", words[0]);
+                    continue;
+                }
+                let against = key_new(words[1].to_string()).expect("invalid hex key");
+                s4h_state.store_complaint_against(against);
+            },
+            "reputation" => {
+                if words.len() != 2 {
+                    error!("Usage: {} node_id", words[0]);
+                    continue;
+                }
+                let node_id = key_new(words[1].to_string()).expect("invalid hex node_id");
+                s4h_state.explore_trust_simple(node_id);
+            }
             "print" => {
                 println!("{}", &s4h_state);
             },

@@ -12,6 +12,11 @@ pub const KEY_SIZE_BYTES: usize = KEY_SIZE_BITS / 8;
 pub type Key = Bytes;
 
 
+pub fn key_new(string: String) -> Result<Key, hex::FromHexError> {
+    let bytes = hex::decode(string)?;
+    Ok(bytes.into())
+}
+
 /// Compares two keys, returns an std::cmp::Ordering
 pub fn key_cmp(k1: &Key, k2: &Key) -> Ordering {
     for (b1, b2) in k1.iter().zip(k2.iter()) {
