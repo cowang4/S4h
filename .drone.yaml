@@ -1,0 +1,9 @@
+
+kind: pipeline
+name: default
+
+steps:
+  - name: tests
+    image: rust
+    commands:
+      - cargo test
