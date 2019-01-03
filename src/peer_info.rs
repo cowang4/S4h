@@ -4,14 +4,13 @@ use std::collections::{LinkedList, linked_list};
 use std::fmt::{self, Debug, Display, Formatter};
 use std::net::SocketAddr;
 use std::sync::{RwLock, RwLockReadGuard};
-use std::time::{Duration};
 use std::ops::{Deref, DerefMut};
 
 use bytes::Bytes;
-use failure::{Error, format_err};
 use uuid::Uuid;
 use serde_derive::{Deserialize, Serialize};
 
+use crate::client;
 use crate::key::{Key, key_cmp, key_dist, key_fmt, KEY_SIZE_BITS, KEY_SIZE_BYTES};
 use crate::rpc::{validate_resp};
 
@@ -293,7 +292,7 @@ impl PeerInfo {
     /// Otherwise, ping the most stale peer in that bucket,
     /// if that peer doesn't respond, drop it and the new one gets in.
     /// else, it responded, so the new one gets dropped.
-    pub async fn insert<'a>(&'a self, my_peer: Peer, k: Key, addr: SocketAddr) {
+    pub fn insert<'a>(&'a self, my_peer: Peer, k: Key, addr: SocketAddr) {
         
         let mut oldest = None;
 
@@ -321,10 +320,9 @@ impl PeerInfo {
             }
         }
 
-        {
+        if let Some(oldest) = oldest {
             // ping oldest peer to see if it's still alive
-            // TODO change to actix
-            // let ping_resp = await!(oldest_client.ping(ping_context, my_peer, ()));
+            let ping_resp = client::ping(oldest.addr, my_peer);
 
             // Re-obtain a mut ref to the bucket, because of limitation of async generator
             // See https://users.rust-lang.org/t/mutexguard-cannot-be-sent-inside-future-generator/21584
@@ -333,16 +331,14 @@ impl PeerInfo {
                                      .expect("obtain kbucket write lock");
             let bucket = bucket_write.deref_mut();
             
-            /*
             match ping_resp {
                 Ok(resp) => {
                     if validate_resp(&resp) {
-                        bucket.push_back(oldest.expect("the full bucket has an oldest"));
+                        bucket.push_back(oldest);
                     }
                 },
                 Err(_) => bucket.push_back(peer),
             }
-            */
         }
 
     }
