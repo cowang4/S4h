@@ -364,7 +364,7 @@ impl S4hState {
     }
 
 
-    pub fn explore_trust_simple(&self, q: Key) -> isize {
+    pub fn explore_trust_simple(&self, q: &Key) -> isize {
         let w = self.get_complaints(q.clone());
 
         // TODO update average statistics with W

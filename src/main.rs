@@ -20,8 +20,8 @@ use std::time::{Duration};
 use actix::prelude::*;
 use actix_web;
 use dotenv;
-use futures;
 use log::{error, warn, info, debug};
+use futures;
 
 use crate::{
     hash::hash,
@@ -84,7 +84,12 @@ fn command_line_shell(s4h_state: S4hState, done: Arc<AtomicBool>) {
                     continue;
                 }
                 let node_id = key_new(words[1].to_string()).expect("invalid hex node_id");
-                s4h_state.explore_trust_simple(node_id);
+                match s4h_state.explore_trust_simple(&node_id) {
+                    1   => println!("{} is trustworthy", key_fmt(&node_id)),
+                    0   => println!("{} is neutral", key_fmt(&node_id)),
+                    -1  => println!("{} is untrustworthy", key_fmt(&node_id)),
+                    _   => error!("{} has an unknown trust score", key_fmt(&node_id)),
+                }
             }
             "print" => {
                 println!("{}", &s4h_state);
