@@ -259,6 +259,7 @@ impl PeerInfo {
         self.buckets[i].read().expect("obtain kbucket read lock")
     }
 
+    #[allow(dead_code)]
     pub fn contains(&self, k: &Key) -> bool {
         let i = self.bucket_of(k);
         self.buckets[i].read().expect("obtain kbucket read lock").deref().contains(k)

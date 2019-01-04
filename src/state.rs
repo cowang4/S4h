@@ -69,11 +69,13 @@ pub struct S4hState {
     pub cr_avg: Arc<RwLock<f32>>,
     /// the average number of complaints by a node
     pub cf_avg: Arc<RwLock<f32>>,
+    /// the addrs that are waiting to get verified
+    unverified_addrs: Arc<RwLock<HashSet<SocketAddr>>>,
 }
 
 impl Display for S4hState {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "S4hState:\n\tmap: {:?}\n\tmy_addr: {:?}\n\tpeer_info: {}", self.map, self.my_addr, self.peer_info)
+        write!(f, "S4hState:\n\tmap: {:?}\n\tmy_addr: {:?}\n\tunverified_addrs: {:?}\n\tpeer_info: {}", self.map, self.my_addr, self.unverified_addrs, self.peer_info)
     }
 }
 
@@ -101,6 +103,7 @@ impl S4hState {
             complaints: Arc::new(CHashMap::<Key, (HashSet<Key>, HashSet<Key>)>::new()),
             cr_avg: Arc::new(RwLock::new(1.0)),
             cf_avg: Arc::new(RwLock::new(1.0)),
+            unverified_addrs: Arc::new(RwLock::new(HashSet::new())),
         }
     }
     
@@ -133,19 +136,6 @@ impl S4hState {
     /// to the tail of the list, and the new sender’s contact is
     /// discarded.
     ///
-    /// NOTE peer should be verified (by pinging that IP and checking result) before this get's
-    /// called. Or TCP or HTTP or something needs to verify that the addr actually belongs to the
-    /// peer
-    fn add_peer<'a>(&'a self, peer: &'a Peer) {
-        if self.peer_info.contains(&peer.id) {
-            self.peer_info.update(&peer.id);
-            return;
-        }
-
-        info!("Adding peer: {}!", &peer);
-        self.peer_info.insert(self.get_my_peer(), peer.id.clone(), peer.addr.clone());
-    }
-
     pub fn add_peer_by_addr<'a>(&'a self, addr: SocketAddr) {
         info!("{}: Start add_peer_by_addr: {}!", &self.my_addr, &addr);
     
@@ -165,13 +155,29 @@ impl S4hState {
             debug!("{}: add_peer_by_addr: already contains {}", &self.my_addr, &addr);
             return;
         }
-
-        let ping_resp = client::ping(addr, self.get_my_peer());
-        if let Ok(ping_resp) = ping_resp {
-            if validate_resp(&ping_resp) {
-                let peer = ping_resp.from.clone();
-                self.peer_info.insert(self.get_my_peer(), peer.id.clone(), peer.addr.clone());
-                info!("{}: Finished add_peer_by_addr of {}", &self.my_addr, &peer);
+        
+        let mut waiting_for_verification = false;
+        {
+            let unverified_addrs_r = self.unverified_addrs.read().unwrap();
+            if unverified_addrs_r.contains(&addr) {
+                waiting_for_verification = true;
+            }
+        }
+        {
+            if !waiting_for_verification {
+                let mut unverified_addrs_w = self.unverified_addrs.write().unwrap();
+                unverified_addrs_w.insert(addr.clone());
+            }
+        }
+        
+        if !waiting_for_verification {
+            let ping_resp = client::ping(addr, self.get_my_peer());
+            if let Ok(ping_resp) = ping_resp {
+                if validate_resp(&ping_resp) {
+                    let peer = ping_resp.from.clone();
+                    self.peer_info.insert(self.get_my_peer(), peer.id.clone(), peer.addr.clone());
+                    info!("{}: Finished add_peer_by_addr of {}", &self.my_addr, &peer);
+                }
             }
         }
     }
@@ -232,7 +238,7 @@ impl S4hState {
                         for peer in peers {
                             // check that this node isn't us
                             if peer.id != self.peer_info.id {
-                                self.add_peer(&peer);
+                                self.add_peer_by_addr(peer.addr.clone());
                                 next_closest_peers.push((key_dist(&key, &peer.id), peer));
                             }
                         }

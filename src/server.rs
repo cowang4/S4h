@@ -9,7 +9,7 @@ use serde_derive::{Deserialize, Serialize};
 
 use crate::{
     key::{key_fmt, Key},
-    state::{S4hState, MessageReturned, validate_peer},
+    state::{S4hState, MessageReturned},
     peer_info::{Peer},
 };
 
@@ -38,7 +38,7 @@ pub fn ping((req, args): (HttpRequest<S4hState>, Json<PingArgs>)) -> Json<Messag
     info!("{}: Received a ping request from {}", &state.my_addr, &args.from);
     let response = MessageReturned::from_peer(state.get_my_peer());
     
-    let valid = validate_peer(&args.from, args.sig);
+    let valid = state.validate_and_update_or_add_peer_with_sig(args.from.clone(), args.sig);
     if !valid {
         warn!("Invalid ping request from peer: {}", &args.from);
         return Json(response);

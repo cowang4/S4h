@@ -108,7 +108,7 @@ fn command_line_shell(s4h_state: S4hState, done: Arc<AtomicBool>) {
 }
 
 
-fn create_peer(addr: SocketAddr, done: Arc<AtomicBool>) -> S4hState {
+fn create_peer(addr: SocketAddr, done: Arc<AtomicBool>, start_command_line: bool) -> S4hState {
     // futures could potentially not like this solution because they want 'static, so no futures
     let mut s4h_state = S4hState::new();
     s4h_state.my_addr = addr;
@@ -125,7 +125,9 @@ fn create_peer(addr: SocketAddr, done: Arc<AtomicBool>) -> S4hState {
 
         System::run(move || {
             Arbiter::spawn_fn(move || {
-                thread::spawn(move || { command_line_shell(s4h_state2.clone(), done); });
+                if start_command_line {
+                    thread::spawn(move || { command_line_shell(s4h_state2.clone(), done); });
+                }
 
                 let my_peer = s4h_state3.get_my_peer();
                 info!("Running server on {} with id {} ...", &my_peer.addr, key_fmt(&my_peer.id));
@@ -170,7 +172,7 @@ fn main() {
     let done = Arc::new(AtomicBool::new(false));
     let done2 = Arc::clone(&done);
 
-    create_peer(listen_addr, done2);
+    create_peer(listen_addr, done2, true);
 
     while !done.load(atomic::Ordering::SeqCst) { thread::sleep(Duration::from_secs(1)); }
 }
@@ -185,10 +187,10 @@ mod tests {
         let done = Arc::new(AtomicBool::new(false));
         let done2 = Arc::clone(&done);
 
-        let s4h_server = create_peer(addr.clone(), done);
+        let s4h_server = create_peer(addr.clone(), done, false);
         let my_peer = s4h_server.get_my_peer();
 
-        let s4h_server2 = create_peer(addr2.clone(), done2);
+        let s4h_server2 = create_peer(addr2.clone(), done2, false);
         let my_peer2 = s4h_server2.get_my_peer();
 
         // client test example
@@ -242,9 +244,9 @@ mod tests {
         let done = Arc::new(AtomicBool::new(false));
         let done2 = Arc::clone(&done);
 
-        let s4h_server = create_peer(addr.clone(), done);
+        let s4h_server = create_peer(addr.clone(), done, false);
 
-        let s4h_server2 = create_peer(addr2.clone(), done2);
+        let s4h_server2 = create_peer(addr2.clone(), done2, false);
 
         debug!("Adding peer2 to peer1's kbuckets");
         s4h_server.add_peer_by_addr(addr2.clone());
@@ -283,9 +285,9 @@ mod tests {
         let done2 = Arc::clone(&done);
         let done3 = Arc::clone(&done);
 
-        let s4h_server = create_peer(addr.clone(), done);
-        let s4h_server2 = create_peer(addr2.clone(), done2);
-        let s4h_server3 = create_peer(addr3.clone(), done3);
+        let s4h_server = create_peer(addr.clone(), done, false);
+        let s4h_server2 = create_peer(addr2.clone(), done2, false);
+        let s4h_server3 = create_peer(addr3.clone(), done3, false);
 
         s4h_server.add_peer_by_addr(addr2.clone());
         s4h_server2.add_peer_by_addr(addr3.clone());
