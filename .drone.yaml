@@ -3,11 +3,11 @@ kind: pipeline
 name: default
 
 steps:
-  - name: tests
-    image: rust
-    commands:
-      - cargo test
   - name: test_three_peers
     image: rust
     commands:
       - cargo test three_peer_test_runner
+  - name: tests
+    image: rust
+    commands:
+      - cargo test
