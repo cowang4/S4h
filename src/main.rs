@@ -258,7 +258,7 @@ mod tests {
         let val = "ipfs://foobar".to_string();
         s4h_server.store(key.clone(), val);
 
-        info!("Finished basic_apt_test");
+        info!("Finished basic_api_test");
         s4h_server.clear();
         s4h_server2.clear();
         Ok(())

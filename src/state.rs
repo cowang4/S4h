@@ -37,7 +37,7 @@ pub struct MessageReturned {
 
 impl Display for MessageReturned {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "MessageReturned:\n\tfrom: {}\n\tkey: {}\n\tvals: {:?}\n\tpeers: {:?}\n\tsig: {:?}", self.from, option_key_fmt(&self.key), self.vals, self.peers, self.sig)
+        write!(f, "MessageReturned:\n\tfrom: {}\n\tkey: {}\n\tvals: {:?}\n\tpeers: {:?}\n\tcomplaints: {:?}\n\tsig: {:?}", self.from, option_key_fmt(&self.key), self.vals, self.peers, self.complaints, self.sig)
     }
 }
 
@@ -179,6 +179,10 @@ impl S4hState {
                     info!("{}: Finished add_peer_by_addr of {}", &self.my_addr, &peer);
                 }
             }
+
+            
+            let mut unverified_addrs_w = self.unverified_addrs.write().unwrap();
+            unverified_addrs_w.remove(&addr);
         }
     }
 
