@@ -25,7 +25,7 @@ use futures;
 
 use crate::{
     hash::hash,
-    key::{key_fmt, key_new},
+    key::{Key},
     server::{create_app},
     state::{S4hState},
 };
@@ -75,20 +75,20 @@ fn command_line_shell(s4h_state: S4hState, done: Arc<AtomicBool>) {
                     error!("Usage: {} against_node_id", words[0]);
                     continue;
                 }
-                let against = key_new(words[1].to_string()).expect("invalid hex key");
-                s4h_state.store_complaint_against(against);
+                let against = Key::from_str(words[1]).expect("invalid hex key");
+                s4h_state.store_complaint_against(&against);
             },
             "reputation" => {
                 if words.len() != 2 {
                     error!("Usage: {} node_id", words[0]);
                     continue;
                 }
-                let node_id = key_new(words[1].to_string()).expect("invalid hex node_id");
+                let node_id = Key::from_str(words[1]).expect("invalid hex node_id");
                 match s4h_state.explore_trust_simple(&node_id) {
-                    1   => println!("{} is trustworthy", key_fmt(&node_id)),
-                    0   => println!("{} is neutral", key_fmt(&node_id)),
-                    -1  => println!("{} is untrustworthy", key_fmt(&node_id)),
-                    _   => error!("{} has an unknown trust score", key_fmt(&node_id)),
+                    1   => println!("{} is trustworthy", &node_id),
+                    0   => println!("{} is neutral", &node_id),
+                    -1  => println!("{} is untrustworthy", &node_id),
+                    _   => error!("{} has an unknown trust score", &node_id),
                 }
             }
             "print" => {
@@ -130,7 +130,7 @@ fn create_peer(addr: SocketAddr, done: Arc<AtomicBool>, start_command_line: bool
                 }
 
                 let my_peer = s4h_state3.get_my_peer();
-                info!("Running server on {} with id {} ...", &my_peer.addr, key_fmt(&my_peer.id));
+                info!("Running server on {} with id {} ...", &my_peer.addr, &my_peer.id);
 
                 http_server.start();
 
@@ -149,13 +149,13 @@ fn main() {
     // TODO overhaul error handling throughout whole project. Any function that can fail shoud
     // return a Result.
     // TODO work on encapsulation. Make struct members private and helper functions
-    // TODO use Arc::clone(x) instead of x.clone()
     // TODO fix the kbucket api, it is prone to creating deadlocks and can
     // be dangerous because in between a contains check and some get or modify,
     // the peer could be deleted.
     // TODO make sure that everywhere that adds a peer is properly validating, with a ping
     // TODO the CHashMap accesses have some subtle race conditions too, with contains
     // TODO use new futures::future::join_all to run async queries simultaneouslly
+    // TODO test many nodes connecting to a bootstrap node
 
     dotenv::dotenv().expect("dotenv");
     env_logger::init();
@@ -326,4 +326,88 @@ mod tests {
         }
     }
 
+
+    fn reputation_test(addr: SocketAddr, addr2: SocketAddr, addr3: SocketAddr, addr4: SocketAddr) -> Result<(), reqwest::Error> {
+        let done = Arc::new(AtomicBool::new(false));
+        let done2 = Arc::clone(&done);
+        let done3 = Arc::clone(&done);
+        let done4 = Arc::clone(&done);
+
+        // first three are fully connected, then state4 is only connected to state3
+        let s4h_state = create_peer(addr.clone(), done, false);
+        let s4h_state2 = create_peer(addr2.clone(), done2, false);
+        let s4h_state3 = create_peer(addr3.clone(), done3, false);
+        let s4h_state4 = create_peer(addr4.clone(), done4, false);
+
+        s4h_state.add_peer_by_addr(addr2.clone());
+        s4h_state2.add_peer_by_addr(addr3.clone());
+        s4h_state3.add_peer_by_addr(addr.clone());
+        s4h_state3.add_peer_by_addr(addr4.clone());
+
+        info!("\np1: {}\np2: {}\np3: {}\np4: {}\n", s4h_state, s4h_state2, s4h_state3, s4h_state4);
+
+        let key = hash("Hello, Reputable World!".as_bytes());
+        let val = "ipfs://foobar".to_string();
+        s4h_state4.store(key.clone(), val);
+
+        info!("\np1: {}\np2: {}\np3: {}\np4: {}\n", s4h_state, s4h_state2, s4h_state3, s4h_state4);
+
+        s4h_state.store_complaint_against(&s4h_state3.get_my_peer().id);
+        s4h_state3.store_complaint_against(&s4h_state.get_my_peer().id);
+        
+        info!("\np1: {}\np2: {}\np3: {}\np4: {}\n", s4h_state, s4h_state2, s4h_state3, s4h_state4);
+
+        let peer3_rep = s4h_state.explore_trust_simple(&s4h_state3.get_my_peer().id);
+        info!("peer3's reputation is {}", peer3_rep);
+        assert_eq!(peer3_rep, 1);
+
+        s4h_state2.store_complaint_against(&s4h_state3.get_my_peer().id);
+        s4h_state3.store_complaint_against(&s4h_state2.get_my_peer().id);
+
+        let peer3_rep = s4h_state.explore_trust_simple(&s4h_state3.get_my_peer().id);
+        info!("peer3's reputation is {}", peer3_rep);
+        assert_eq!(peer3_rep, 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn reputation_test_runner() {
+        dotenv::dotenv().expect("dotenv");
+        let _ = env_logger::try_init();
+
+        let addr: SocketAddr = "127.0.0.1:10241".parse().unwrap();
+        let addr2: SocketAddr = "127.0.0.1:10242".parse().unwrap();
+        let addr3: SocketAddr = "127.0.0.1:10243".parse().unwrap();
+        let addr4: SocketAddr = "127.0.0.1:10244".parse().unwrap();
+
+        match reputation_test(addr, addr2, addr3, addr4) {
+           Err(e) => error!("{}: {:?}", e, e.backtrace()),
+            Ok(_) => {},
+        }
+    }
+
+    #[test]
+    fn many_peers_test() {
+        dotenv::dotenv().expect("dotenv");
+        let _ = env_logger::try_init();
+
+
+        let done = Arc::new(AtomicBool::new(false));
+        let mut peers = Vec::new();
+
+        // create peers
+        for port in 10245..10345 {
+            let done2 = Arc::clone(&done);
+            let addr = format!("127.0.0.1:{}", port).parse().expect("valid port");
+            let state = create_peer(addr, done2, false);
+            peers.push(state);
+        }
+
+        // connect all peers to boostrap node
+        let bootstrap_addr = peers[0].get_my_peer().addr;
+        for peer in peers.iter().skip(1) {
+            peer.add_peer_by_addr(bootstrap_addr.clone());
+        }
+    }
 }

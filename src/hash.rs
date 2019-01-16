@@ -1,6 +1,4 @@
 
-use bytes::Bytes;
-
 use crate::key::{KEY_SIZE_BYTES, Key};
 
 
@@ -9,7 +7,7 @@ pub fn hash(data: &[u8]) -> Key {
     let mut state = blake2b_simd::Params::new().hash_length(KEY_SIZE_BYTES).to_state();
     state.update(data);
     let hash = state.finalize();
-    Bytes::from(hash.as_bytes())
+    Key::from(hash.as_bytes())
 }
 
 
@@ -21,6 +19,6 @@ mod tests {
     fn test_hash() {
         let input = "the quick brown fox jumps over the lazy dog".as_bytes();
         let out = hash(input);
-        assert_eq!(out, &[91, 251, 115, 114, 189, 178, 241, 105, 237, 140, 128, 14, 94, 228, 65, 232][..]);
+        assert_eq!(out, (&[91, 251, 115, 114, 189, 178, 241, 105, 237, 140, 128, 14, 94, 228, 65, 232]).into());
     }
 }

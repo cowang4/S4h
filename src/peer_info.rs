@@ -3,15 +3,14 @@ use std::cmp::Ordering;
 use std::collections::{LinkedList, linked_list};
 use std::fmt::{self, Debug, Display, Formatter};
 use std::net::SocketAddr;
-use std::sync::{RwLock, RwLockReadGuard};
+use std::sync::{RwLock};
 use std::ops::{Deref, DerefMut};
 
-use bytes::Bytes;
 use uuid::Uuid;
 use serde_derive::{Deserialize, Serialize};
 
 use crate::client;
-use crate::key::{Key, key_cmp, key_dist, key_fmt, KEY_SIZE_BITS, KEY_SIZE_BYTES};
+use crate::key::{Key, KEY_SIZE_BITS, KEY_SIZE_BYTES};
 use crate::state::{validate_resp};
 
 
@@ -26,14 +25,6 @@ pub struct Peer {
 
 impl Peer {
 
-    #[allow(dead_code)]
-    pub fn new() -> Peer {
-        Peer {
-            id: Key::new(),
-            addr: "127.0.0.1:0".parse().expect("parse default addr"),
-        }
-    }
-
     pub fn with_id(k: Key) -> Peer {
         Peer {
             id: k,
@@ -44,13 +35,13 @@ impl Peer {
 
 impl Display for Peer {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "Peer: id: {}  addr: {:?}", key_fmt(&self.id), self.addr)
+        write!(f, "Peer: id: {}  addr: {:?}", &self.id, self.addr)
     }
 }
 
 impl Debug for Peer {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "Peer: id: {}  addr: {:?}", key_fmt(&self.id), self.addr)
+        write!(f, "Peer: id: {}  addr: {:?}", &self.id, self.addr)
     }
 }
 
@@ -99,7 +90,7 @@ impl KBucket {
     /// O(n) lookup
     pub fn contains(&self, key: &Key) -> bool {
         for peer in self.0.iter() {
-            if peer.id == key {
+            if &peer.id == key {
                 return true;
             }
         }
@@ -123,7 +114,7 @@ impl KBucket {
     /// if it exists, else None
     pub fn index(&self, key: &Key) -> Option<usize> {
         for (i, peer) in self.0.iter().enumerate() {
-            if peer.id == key {
+            if &peer.id == key {
                 return Some(i);
             }
         }
@@ -151,19 +142,19 @@ impl KBucket {
     }
 
     /// O(n) lookup of Peer by key
-    pub fn get<'a>(&'a self, key: &Key) -> Option<&'a Peer> {
+    pub fn get(&self, key: &Key) -> Option<Peer> {
         for peer in self.0.iter() {
-            if peer.id == key {
-                return Some(peer);
+            if &peer.id == key {
+                return Some(peer.clone());
             }
         }
         None
     }
 
-    pub fn get_peer_by_addr<'a>(&'a self, addr: &SocketAddr) -> Option<&'a Peer> {
+    pub fn get_peer_by_addr(&self, addr: &SocketAddr) -> Option<Peer> {
         for peer in self.iter() {
             if peer.addr == *addr {
-                return Some(peer);
+                return Some(peer.clone());
             }
         }
         None
@@ -207,7 +198,7 @@ impl PeerInfo {
             vec.push(RwLock::new(KBucket::new()));
         }
         let id = match k {
-            None => Bytes::from(&Uuid::new_v4().as_bytes()[..]),
+            None => Key::from(&Uuid::new_v4().as_bytes()[..]),
             Some(k) => k,
         };
         PeerInfo {
@@ -220,7 +211,7 @@ impl PeerInfo {
     /// Bucket is determined by distance from self.
     /// 2^1 <= dist(self, k) < 2^i+1
     pub fn bucket_of(&self, k: &Key) -> usize {
-        let dist = key_dist(&self.id, k);
+        let dist = self.id.dist(k);
         for (group, b) in dist.iter().enumerate() {
             let mut b: u8 = *b;
             if b > 0 {
@@ -248,15 +239,16 @@ impl PeerInfo {
         return 0;
     }
 
-    pub fn get<'a>(&'a self, k: &Key) -> RwLockReadGuard<'a, KBucket> {
+    pub fn get(&self, k: &Key) -> Option<Peer> {
         let i: usize = self.bucket_of(k);
-        let bucket: std::sync::RwLockReadGuard<'a, KBucket> = self.buckets[i].read().expect("obtain kbucket read lock");
-        bucket
+        let bucket: std::sync::RwLockReadGuard<KBucket> = self.buckets[i].read().expect("obtain kbucket read lock");
+        bucket.get(k)
     }
 
-    pub fn get_peer_by_addr<'a>(&'a self, addr: &SocketAddr) -> RwLockReadGuard<'a, KBucket> {
+    pub fn get_peer_by_addr(&self, addr: &SocketAddr) -> Option<Peer> {
         let i: usize = self.bucket_of_addr(addr);
-        self.buckets[i].read().expect("obtain kbucket read lock")
+        let bucket = self.buckets[i].read().expect("obtain kbucket read lock");
+        bucket.get_peer_by_addr(addr)
     }
 
     #[allow(dead_code)]
@@ -348,10 +340,10 @@ impl PeerInfo {
     /// Returns the K closer to key known peers.
     /// Filters closest_k_peers by being closer than self to key.
     pub fn closer_k_peers(&self, key: Key) -> Option<Vec<Peer>> {
-        let dist_from_self = key_dist(&self.id, &key);
+        let dist_from_self = self.id.dist(&key);
         let all_peers = self.closest_k_peers(key.clone());
         if let Some(all_peers) = all_peers {
-            let filtered_peers: Vec<Peer> = all_peers.into_iter().filter(|k| key_cmp(&key_dist(&k.id, &key), &dist_from_self) == Ordering::Less).collect();
+            let filtered_peers: Vec<Peer> = all_peers.into_iter().filter(|k| k.id.dist(&key).cmp(&dist_from_self) == Ordering::Less).collect();
             if filtered_peers.len() == 0 {
                 None
             }
@@ -376,7 +368,7 @@ impl PeerInfo {
             }
         }
 
-        all_peers.sort_unstable_by(|a, b| key_cmp(&key_dist(&key, &a.id), &key_dist(&key, &b.id)));
+        all_peers.sort_unstable_by(|a, b| key.dist(&a.id).cmp(&key.dist(&b.id)));
         all_peers.truncate(x);
 
         if all_peers.len() == 0 {
@@ -420,7 +412,7 @@ impl PeerInfo {
 
 impl Display for PeerInfo {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        let mut res = format!("Peer Info:\n\tid: {}\n\tbuckets:\n", &key_fmt(&self.id));
+        let mut res = format!("Peer Info:\n\tid: {}\n\tbuckets:\n", &self.id);
         let mut start_empty: Option<usize> = None;
         for (i, bucket) in self.buckets.iter().enumerate() {
             let bucket_read = bucket.read().expect("obtain kbucket read lock");
@@ -483,7 +475,7 @@ mod tests {
     #[test]
     fn test_kbucket_move_to_back() {
         let mut l1 = KBucket::new();
-        let k1 = Bytes::from_static(&[255; 16]);
+        let k1 = Key::from(&[255; 16]);
         l1.push_back(("127.0.0.1:8080".parse().unwrap(), k1.clone()).into());
         l1.push_back(("127.0.0.2:8080".parse().unwrap(), k1.clone()).into());
         l1.push_back(("127.0.0.3:8080".parse().unwrap(), k1.clone()).into());
@@ -508,11 +500,11 @@ mod tests {
 
     #[test]
     fn test_bucket_of() {
-        let k1 = Bytes::from_static(&[0; 16]);
-        let k2 = Bytes::from_static(&[255; 16]);
-        let k3 = Bytes::from_static(&[1; 16]); 
-        let k4 = Bytes::from_static(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
-        let k5 = Bytes::from_static(&[128; 16]); 
+        let k1 = Key::from(&[0; 16]);
+        let k2 = Key::from(&[255; 16]);
+        let k3 = Key::from(&[1; 16]); 
+        let k4 = Key::from(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+        let k5 = Key::from(&[128; 16]); 
         let p1 = PeerInfo::new(Some(k1.clone()));
         assert_eq!(0, p1.bucket_of(&k1));
         assert_eq!(120, p1.bucket_of(&k3));
@@ -528,11 +520,11 @@ mod tests {
     #[test]
     fn test_remove() {
         let mut bucket1 = KBucket::new();
-        let k1 = Bytes::from_static(&[255; 16]);
-        let k2 = Bytes::from_static(&[254; 16]);
-        let k3 = Bytes::from_static(&[253; 16]);
-        let k4 = Bytes::from_static(&[252; 16]);
-        let k5 = Bytes::from_static(&[251; 16]);
+        let k1 = Key::from(&[255; 16]);
+        let k2 = Key::from(&[254; 16]);
+        let k3 = Key::from(&[253; 16]);
+        let k4 = Key::from(&[252; 16]);
+        let k5 = Key::from(&[251; 16]);
         bucket1.push_back(("127.0.0.1:8080".parse().unwrap(), k1.clone()).into());
         bucket1.push_back(("127.0.0.2:8080".parse().unwrap(), k2.clone()).into());
         bucket1.push_back(("127.0.0.3:8080".parse().unwrap(), k3.clone()).into());

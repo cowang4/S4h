@@ -2,7 +2,7 @@
 use std::collections::HashSet;
 use std::fmt::{self, Display, Formatter};
 use std::net::SocketAddr;
-use std::ops::{Deref};
+use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, RwLock};
 
 use chashmap::CHashMap;
@@ -10,7 +10,7 @@ use log::{debug, info, warn, error};
 use serde_derive::{Deserialize, Serialize};
 
 use crate::client;
-use crate::key::{Key, option_key_fmt, key_dist, key_cmp, key_fmt, key_inverse};
+use crate::key::{Key};
 use crate::peer_info::{Peer, PeerInfo, ALPHA, K};
 use crate::reputation::{WitnessReport};
 
@@ -37,7 +37,7 @@ pub struct MessageReturned {
 
 impl Display for MessageReturned {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "MessageReturned:\n\tfrom: {}\n\tkey: {}\n\tvals: {:?}\n\tpeers: {:?}\n\tcomplaints: {:?}\n\tsig: {:?}", self.from, option_key_fmt(&self.key), self.vals, self.peers, self.complaints, self.sig)
+        write!(f, "MessageReturned:\n\tfrom: {}\n\tkey: {:?}\n\tvals: {:?}\n\tpeers: {:?}\n\tcomplaints: {:?}\n\tsig: {:?}", self.from, self.key, self.vals, self.peers, self.complaints, self.sig)
     }
 }
 
@@ -75,7 +75,7 @@ pub struct S4hState {
 
 impl Display for S4hState {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "S4hState:\n\tmap: {:?}\n\tmy_addr: {:?}\n\tunverified_addrs: {:?}\n\tpeer_info: {}", self.map, self.my_addr, self.unverified_addrs, self.peer_info)
+        write!(f, "S4hState:\n\tmap: {:?}\n\tmy_addr: {:?}\n\tunverified_addrs: {:?}\n\tpeer_info: {}\n\tcomplaints: {:?}", self.map, self.my_addr, self.unverified_addrs, self.peer_info, self.complaints)
     }
 }
 
@@ -101,8 +101,8 @@ impl S4hState {
             peer_info: Arc::new(PeerInfo::new(None)),
             my_addr: "127.0.0.1:1234".parse().unwrap(),
             complaints: Arc::new(CHashMap::<Key, (HashSet<Key>, HashSet<Key>)>::new()),
-            cr_avg: Arc::new(RwLock::new(1.0)),
-            cf_avg: Arc::new(RwLock::new(1.0)),
+            cr_avg: Arc::new(RwLock::new(0.001)),
+            cf_avg: Arc::new(RwLock::new(0.001)),
             unverified_addrs: Arc::new(RwLock::new(HashSet::new())),
         }
     }
@@ -142,17 +142,8 @@ impl S4hState {
         // check that that addr isn't already in the kbuckets
         if self.peer_info.contains_addr(&addr) {
             debug!("{}: add_peer_by_addr: contains addr {}", &self.my_addr, &addr);
-            #[allow(unused_assignments)]
-            let mut peer_id: Option<Key> = None;
-            {
-                let bucket = self.peer_info.get_peer_by_addr(&addr);
-                debug!("{}: add_peer_by_addr: got bucket", &self.my_addr);
-                let peer = bucket.deref().get_peer_by_addr(&addr).expect("peer that I just checked for");
-                peer_id = Some(peer.id.clone());
-            }
-            let peer_id = peer_id.unwrap();
+            let peer_id: Key = self.peer_info.get_peer_by_addr(&addr).unwrap().id;
             self.peer_info.update(&peer_id);
-            debug!("{}: add_peer_by_addr: already contains {}", &self.my_addr, &addr);
             return;
         }
         
@@ -186,12 +177,32 @@ impl S4hState {
         }
     }
 
+
     pub fn get_my_peer(&self) -> Peer {
         Peer::from((self.my_addr, self.peer_info.id.clone()))
     }
 
+    
+    pub fn store_in_hashtable(&self, key: Key, value: String) {
+        if self.map.contains_key(&key) {
+            // check for value, don't want duplicates of the same string value.
+            if !self.map.get(&key).unwrap().deref().contains(&value) {
+                debug!("Pushing back value: {}", &value);
+                self.map.get_mut(&key).unwrap().deref_mut().push(value.clone());
+            }
+            else {
+                debug!("Map already contains value: {}", &value);
+            }
+        }
+        else {
+            debug!("Insert_new key: {} with value: {}", &key, &value);
+            self.map.insert_new(key.clone(), vec![value.clone()]);
+        }
+    }
+
+
     pub fn node_lookup<'a>(&'a self, key: Key) -> Vec<Peer> {
-        info!("{}: Starting node lookup of {}", &self.my_addr, &key_fmt(&key));
+        info!("{}: Starting node lookup of {}", &self.my_addr, &key);
         // will be filled with IDs of nodes that have been asked
         let mut queried = HashSet::<Key>::new();
         let mut closest_peers = Vec::<(Key, Peer)>::new(); // dist, Peer
@@ -200,10 +211,10 @@ impl S4hState {
         let closest_initial_peers = self.peer_info.closest_alpha_peers(key.clone());
         if let Some(closest_initial_peers) = closest_initial_peers {
             for peer in closest_initial_peers {
-                closest_peers.push((key_dist(&key, &peer.id), peer));
+                closest_peers.push((key.dist(&peer.id), peer));
             }
         }
-        closest_peers.sort_unstable_by(|a, b| key_cmp(&a.0, &b.0));
+        closest_peers.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         let mut closest_peer: Option<(Key, Peer)> = None;
 
         loop {
@@ -243,7 +254,7 @@ impl S4hState {
                             // check that this node isn't us
                             if peer.id != self.peer_info.id {
                                 self.add_peer_by_addr(peer.addr.clone());
-                                next_closest_peers.push((key_dist(&key, &peer.id), peer));
+                                next_closest_peers.push((key.dist(&peer.id), peer));
                             }
                         }
                     }
@@ -262,7 +273,7 @@ impl S4hState {
                 }
             }
             closest_peer = Some(closest_peers[0].clone());
-            closest_peers.sort_unstable_by(|a, b| key_cmp(&a.0, &b.0));
+            closest_peers.sort_unstable_by(|a, b| a.0.cmp(&b.0));
 
             // If a round
             // of FIND NODEs fails to return a node any closer
@@ -275,7 +286,7 @@ impl S4hState {
             }
         }
 
-        info!("{}: Finished node lookup of {}", &self.my_addr, &key_fmt(&key));
+        info!("{}: Finished node lookup of {}", &self.my_addr, &key);
 
         closest_peers.truncate(K);
         closest_peers.iter().map(|p| p.1.clone()).collect()
@@ -285,6 +296,7 @@ impl S4hState {
     /// Looks up the closest peers to key in the DHT and then sends them a store
     pub fn store(&self, key: Key, value: String) {
         info!("{}: Starting store.", &self.my_addr);
+        self.store_in_hashtable(key.clone(), value.clone());
         let closest_peers_in_dht: Vec<Peer> = self.node_lookup(key.clone());
         let closest_peers_in_dht_len = closest_peers_in_dht.len();
         for peer in closest_peers_in_dht {
@@ -292,6 +304,7 @@ impl S4hState {
         }
         info!("{}: Finished store. Sent to {} peers.", &self.my_addr, closest_peers_in_dht_len);
     }
+
 
     pub fn find_value(&self, key: Key) -> Vec<String> {
         let closest_peers_in_dht: Vec<Peer> = self.node_lookup(key.clone());
@@ -313,16 +326,15 @@ impl S4hState {
 
 
     /// Looks up the closest peers to against in the DHT and then sends them a store_complaint_against
-    pub fn store_complaint_against(&self, against: Key) {
-        info!("{}: Starting store_complaint_against.", &self.my_addr);
-        let against_bucket = self.peer_info.get(&against);
-        let against_peer = against_bucket.deref().get(&against);
+    pub fn store_complaint_against(&self, against: &Key) {
+        info!("{}: Starting store_complaint_against against {}.", &self.my_addr, against);
+        let against_peer = self.peer_info.get(against);
         if against_peer.is_none() {
-            error!("Peer not known with key: {}", &key_fmt(&against));
+            error!("Peer not known with key: {}", against);
             return;
         }
         let against_peer = against_peer.unwrap();
-        let inverse_by = key_inverse(&against);
+        let inverse_by = against.inverse();
         let closest_peers_in_dht: Vec<Peer> = self.node_lookup(inverse_by.clone());
         let closest_peers_in_dht_len = closest_peers_in_dht.len();
         for peer in closest_peers_in_dht {
@@ -335,7 +347,7 @@ impl S4hState {
     /// Looks up the closest peers to against.addr in the DHT and then sends them a store_complaint_by
     pub fn store_complaint_by(&self, by: Peer, sig_by: (), against: Peer) {
         info!("{}: Starting store_complaint_by.", &self.my_addr);
-        let inverse_by = key_inverse(&by.id);
+        let inverse_by = by.id.inverse();
         let closest_peers_in_dht: Vec<Peer> = self.node_lookup(inverse_by.clone());
         let closest_peers_in_dht_len = closest_peers_in_dht.len();
         for peer in closest_peers_in_dht {
@@ -366,6 +378,8 @@ impl S4hState {
         let cr_avg = self.cr_avg.read().unwrap();
         let cf_avg = self.cf_avg.read().unwrap();
         let sqr_term = (0.5 + (4.0 / (*cr_avg * *cf_avg).sqrt())).powi(2);
+        debug!("sqr_term: {}  cr: {}  cf: {}", &sqr_term, cr, cf);
+        debug!("score: {}    threshold: {}", cr as f32 * cf as f32, sqr_term * *cr_avg * *cf_avg);
         if cr as f32 * cf as f32 <= sqr_term * *cr_avg * *cf_avg {
             1
         } else {
