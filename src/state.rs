@@ -169,6 +169,8 @@ impl S4hState {
                     self.peer_info.insert(self.get_my_peer(), peer.id.clone(), peer.addr.clone());
                     info!("{}: Finished add_peer_by_addr of {}", &self.my_addr, &peer);
                 }
+            } else {
+                warn!("ping to {} failed with error: {:?}", addr, ping_resp);
             }
 
             
@@ -300,7 +302,10 @@ impl S4hState {
         let closest_peers_in_dht: Vec<Peer> = self.node_lookup(key.clone());
         let closest_peers_in_dht_len = closest_peers_in_dht.len();
         for peer in closest_peers_in_dht {
-            let _ = client::store(peer.addr, self.get_my_peer(), key.clone(), value.clone());
+            let store_resp = client::store(peer.addr, self.get_my_peer(), key.clone(), value.clone());
+            if store_resp.is_err() {
+                warn!("store to {} failed with error: {:?}", peer, store_resp);
+            }
         }
         info!("{}: Finished store. Sent to {} peers.", &self.my_addr, closest_peers_in_dht_len);
     }
@@ -319,6 +324,8 @@ impl S4hState {
                         }
                     }
                 }
+            } else {
+                warn!("find_value to {} failed with error: {:?}", peer, find_val_resp);
             }
         }
         values
@@ -338,7 +345,10 @@ impl S4hState {
         let closest_peers_in_dht: Vec<Peer> = self.node_lookup(inverse_by.clone());
         let closest_peers_in_dht_len = closest_peers_in_dht.len();
         for peer in closest_peers_in_dht {
-            let _ = client::store_complaint_against(peer.addr, self.get_my_peer(), against_peer.clone());
+            let store_complaint_against_resp = client::store_complaint_against(peer.addr, self.get_my_peer(), against_peer.clone());
+            if store_complaint_against_resp.is_err() {
+                warn!("store_complaint_against to {} failed with error: {:?}", peer, store_complaint_against_resp);
+            }
         }
         info!("{}: Finished store_complaint_against. Sent to {} peers.", &self.my_addr, closest_peers_in_dht_len);
     }
@@ -351,7 +361,10 @@ impl S4hState {
         let closest_peers_in_dht: Vec<Peer> = self.node_lookup(inverse_by.clone());
         let closest_peers_in_dht_len = closest_peers_in_dht.len();
         for peer in closest_peers_in_dht {
-            let _ = client::store_complaint_by(peer.addr, self.get_my_peer(), by.clone(), sig_by, against.clone());
+            let store_complaint_by_resp = client::store_complaint_by(peer.addr, self.get_my_peer(), by.clone(), sig_by, against.clone());
+            if store_complaint_by_resp.is_err() {
+                warn!("store_complaint_by to {} failed with error: {:?}", peer, store_complaint_by_resp);
+            }
         }
         info!("{}: Finished store_complaint_by. Sent to {} peers.", &self.my_addr, closest_peers_in_dht_len);
     }
@@ -363,10 +376,14 @@ impl S4hState {
         let closest_peers_in_dht: Vec<Peer> = self.node_lookup(q.clone());
         let closest_peers_in_dht_len = closest_peers_in_dht.len();
         for peer in closest_peers_in_dht {
-            let query_res = client::query_complaints(peer.addr, self.get_my_peer(), q.clone()).expect("query_complaint to succeed");
-            if let Some(data) = query_res.complaints {
-                let witness_report = WitnessReport::from_complaint_data(peer.id.clone(), data);
-                res.insert(witness_report);
+            let query_res = client::query_complaints(peer.addr, self.get_my_peer(), q.clone());
+            if let Ok(query_res) = query_res {
+                if let Some(data) = query_res.complaints {
+                    let witness_report = WitnessReport::from_complaint_data(peer.id.clone(), data);
+                    res.insert(witness_report);
+                }
+            } else {
+                warn!("query_complaints to {} failed with error: {:?}", peer, query_res);
             }
         }
         info!("{}: Finished get_complaints. Asked {} peers.", &self.my_addr, closest_peers_in_dht_len);

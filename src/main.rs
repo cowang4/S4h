@@ -397,7 +397,7 @@ mod tests {
         let mut peers = Vec::new();
 
         // create peers
-        for port in 10245..10345 {
+        for port in 10245..10265 {
             let done2 = Arc::clone(&done);
             let addr = format!("127.0.0.1:{}", port).parse().expect("valid port");
             let state = create_peer(addr, done2, false);
