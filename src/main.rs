@@ -20,7 +20,7 @@ use std::time::{Duration};
 use actix::prelude::*;
 use actix_web;
 use dotenv;
-use log::{error, warn, info, debug};
+use log::{error, warn, info};
 use futures;
 
 use crate::{
@@ -69,6 +69,9 @@ fn command_line_shell(s4h_state: S4hState, done: Arc<AtomicBool>) {
                 let key = hash(words[1].as_bytes());
                 let vals = s4h_state.find_value(key);
                 println!("{:?}", vals);
+            },
+            "find_self" | "refresh" | "update" => {
+                s4h_state.find_self();
             },
             "complain" => {
                 if words.len() != 2 {
@@ -139,23 +142,18 @@ fn create_peer(addr: SocketAddr, done: Arc<AtomicBool>, start_command_line: bool
         });
     });
 
-    debug!("Returning from create_peer.");
     s4h_state4
 }
 
 
 fn main() {
 
-    // TODO overhaul error handling throughout whole project. Any function that can fail shoud
-    // return a Result.
-    // TODO work on encapsulation. Make struct members private and helper functions
     // TODO fix the kbucket api, it is prone to creating deadlocks and can
     // be dangerous because in between a contains check and some get or modify,
     // the peer could be deleted.
-    // TODO make sure that everywhere that adds a peer is properly validating, with a ping
     // TODO the CHashMap accesses have some subtle race conditions too, with contains
     // TODO use new futures::future::join_all to run async queries simultaneouslly
-    // TODO test many nodes connecting to a bootstrap node
+    // TODO update rep statistics
 
     dotenv::dotenv().expect("dotenv");
     env_logger::init();
@@ -182,6 +180,7 @@ fn main() {
 mod tests {
     use super::*;
     use failure::{Fail};
+    use log::{debug};
 
     fn basic_rpc_test(addr: SocketAddr, addr2: SocketAddr) -> Result<(), reqwest::Error> {
         let done = Arc::new(AtomicBool::new(false));
@@ -352,6 +351,7 @@ mod tests {
 
         info!("\np1: {}\np2: {}\np3: {}\np4: {}\n", s4h_state, s4h_state2, s4h_state3, s4h_state4);
 
+        // 1 complain about 3
         s4h_state.store_complaint_against(&s4h_state3.get_my_peer().id);
         s4h_state3.store_complaint_against(&s4h_state.get_my_peer().id);
         
@@ -361,10 +361,19 @@ mod tests {
         info!("peer3's reputation is {}", peer3_rep);
         assert_eq!(peer3_rep, 1);
 
+        // 2 complain about 3
         s4h_state2.store_complaint_against(&s4h_state3.get_my_peer().id);
         s4h_state3.store_complaint_against(&s4h_state2.get_my_peer().id);
 
         let peer3_rep = s4h_state.explore_trust_simple(&s4h_state3.get_my_peer().id);
+        info!("peer3's reputation is {}", peer3_rep);
+        assert_eq!(peer3_rep, 1);
+
+        // 4 complain about 3
+        s4h_state4.store_complaint_against(&s4h_state3.get_my_peer().id);
+        s4h_state3.store_complaint_against(&s4h_state4.get_my_peer().id);
+
+        let peer3_rep = s4h_state4.explore_trust_simple(&s4h_state3.get_my_peer().id);
         info!("peer3's reputation is {}", peer3_rep);
         assert_eq!(peer3_rep, 1);
 
@@ -408,6 +417,29 @@ mod tests {
         let bootstrap_addr = peers[0].get_my_peer().addr;
         for peer in peers.iter().skip(1) {
             peer.add_peer_by_addr(bootstrap_addr.clone());
+        }
+
+        // lookup ourselves to fill in kbuckets
+        for peer in peers.iter() {
+            peer.find_self();
+        }
+
+        // store a value
+        let key = hash("Hello, Reputable World!".as_bytes());
+        let val = "ipfs://foobar".to_string();
+        peers[7].store(key.clone(), val);
+
+        for (i, peer) in peers.iter().skip(1).enumerate() {
+            let peer0_id = peers[0].get_my_peer().id;
+            peer.store_complaint_against(&peer0_id);
+            peers[0].store_complaint_against(&peer.get_my_peer().id);
+            let rep = peer.explore_trust_simple(&peer0_id);
+            info!("i {}", i);
+            if i < 4 {
+                assert_eq!(rep, 1);
+            } else {
+                assert_eq!(rep, -1);
+            }
         }
     }
 }

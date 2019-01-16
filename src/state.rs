@@ -137,7 +137,6 @@ impl S4hState {
     /// discarded.
     ///
     pub fn add_peer_by_addr<'a>(&'a self, addr: SocketAddr) {
-        info!("{}: Start add_peer_by_addr: {}!", &self.my_addr, &addr);
     
         // check that that addr isn't already in the kbuckets
         if self.peer_info.contains_addr(&addr) {
@@ -167,7 +166,7 @@ impl S4hState {
                 if validate_resp(&ping_resp) {
                     let peer = ping_resp.from.clone();
                     self.peer_info.insert(self.get_my_peer(), peer.id.clone(), peer.addr.clone());
-                    info!("{}: Finished add_peer_by_addr of {}", &self.my_addr, &peer);
+                    debug!("{}: add_peer_by_addr: added {}", &self.my_addr, &peer);
                 }
             } else {
                 warn!("ping to {} failed with error: {:?}", addr, ping_resp);
@@ -295,6 +294,13 @@ impl S4hState {
     }
 
 
+    /// Lookup our own node_id to fill in our kbuckets
+    pub fn find_self(&self) {
+        info!("{}: Looking up our own node_id", &self.my_addr);
+        let _ = self.node_lookup(self.get_my_peer().id);
+    }
+
+
     /// Looks up the closest peers to key in the DHT and then sends them a store
     pub fn store(&self, key: Key, value: String) {
         info!("{}: Starting store.", &self.my_addr);
@@ -391,6 +397,8 @@ impl S4hState {
     }
 
 
+    /// BUG: if the bad actor doesn't complain back, then it's cf will be 0,
+    /// and therefore it's reputation will always be 1
     fn decide_reputation(&self, cr: usize, cf: usize) -> isize {
         let cr_avg = self.cr_avg.read().unwrap();
         let cf_avg = self.cf_avg.read().unwrap();
