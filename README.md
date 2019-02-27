@@ -5,7 +5,7 @@ This repository holds the code and tests of a basic implementation of the
 search engine described in my Master's Thesis with the same title.
 
 To run this project, you'll need to install Rust (using
-[rustup](https://rustup.rs), then in the repository run `cargo test` to run the
+[rustup](https://rustup.rs)), then in the repository run `cargo test` to run the
 included tests.
 
 To read the code (as of version 0.2.0), I recommend reading it from the top down, starting from
