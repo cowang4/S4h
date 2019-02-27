@@ -13,4 +13,4 @@ To read the code (as of version 0.2.0), I recommend reading it from the top down
 level of abstraction of state is in `src/peer_info.rs`. Finally, some auxiliary
 functions and structures are in `src/client.rs`, `src/key.rs`, `src/hash.rs`, and
 `src/reputation.rs`. As of the time of writing this, the code is unfortunately
-very poorly commented. Some insight on the design is avaliable in the thesis.
+very poorly commented. Some insight on the design is available in the thesis.
