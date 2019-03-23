@@ -6,7 +6,6 @@ use std::net::SocketAddr;
 use std::sync::{RwLock};
 use std::ops::{Deref, DerefMut};
 
-use uuid::Uuid;
 use serde_derive::{Deserialize, Serialize};
 
 use crate::client;
@@ -14,8 +13,9 @@ use crate::key::{Key, KEY_SIZE_BITS, KEY_SIZE_BYTES};
 use crate::state::{validate_resp};
 
 
-pub const K: usize = 20;    /// KBucket size parameter
+pub const K: usize = 6;    /// KBucket size parameter
 pub const ALPHA: usize = 3; /// concurrency parameter
+
 
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct Peer {
@@ -192,15 +192,12 @@ impl PeerInfo {
     
 
     #[allow(dead_code)]
-    pub fn new(k: Option<Key>) -> PeerInfo {
+    pub fn new(k: Key) -> PeerInfo {
         let mut vec = Vec::<RwLock<KBucket>>::with_capacity(KEY_SIZE_BITS);
         for _ in 0..KEY_SIZE_BITS {
             vec.push(RwLock::new(KBucket::new()));
         }
-        let id = match k {
-            None => Key::from(&Uuid::new_v4().as_bytes()[..]),
-            Some(k) => k,
-        };
+        let id = k;
         PeerInfo {
             buckets: vec,
             id: id,
@@ -399,6 +396,20 @@ impl PeerInfo {
         return false;
     }
 
+    #[allow(dead_code)]
+    pub fn all_peers(&self) -> Vec<Peer> {
+        let mut all_peers = Vec::new();
+
+        for bucket_locked in self.buckets.iter() {
+            let bucket_read = bucket_locked.read().expect("obtain kbucket read lock");
+            let bucket = bucket_read.deref();
+            for peer in bucket.iter() {
+                all_peers.push(peer.clone());
+            }
+        }
+        all_peers
+    }
+
     // clears the kbuckets, so that clients are dropped and the tests can finish
     #[allow(dead_code)]
     pub fn clear(&self) {
@@ -475,7 +486,7 @@ mod tests {
     #[test]
     fn test_kbucket_move_to_back() {
         let mut l1 = KBucket::new();
-        let k1 = Key::from(&[255; 16]);
+        let k1 = Key::from(&[255; KEY_SIZE_BYTES]);
         l1.push_back(("127.0.0.1:8080".parse().unwrap(), k1.clone()).into());
         l1.push_back(("127.0.0.2:8080".parse().unwrap(), k1.clone()).into());
         l1.push_back(("127.0.0.3:8080".parse().unwrap(), k1.clone()).into());
@@ -500,31 +511,39 @@ mod tests {
 
     #[test]
     fn test_bucket_of() {
-        let k1 = Key::from(&[0; 16]);
-        let k2 = Key::from(&[255; 16]);
-        let k3 = Key::from(&[1; 16]); 
-        let k4 = Key::from(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
-        let k5 = Key::from(&[128; 16]); 
-        let p1 = PeerInfo::new(Some(k1.clone()));
-        assert_eq!(0, p1.bucket_of(&k1));
-        assert_eq!(120, p1.bucket_of(&k3));
-        assert_eq!(127, p1.bucket_of(&k2));
-        assert_eq!(8, p1.bucket_of(&k4));
-        let p2 = PeerInfo::new(Some(k2.clone()));
-        assert_eq!(0, p2.bucket_of(&k2));
-        assert_eq!(127, p2.bucket_of(&k3));
-        assert_eq!(127, p2.bucket_of(&k4));
-        assert_eq!(126, p2.bucket_of(&k5));
+        let k1 = Key::from(&[0; KEY_SIZE_BYTES]);
+        let k2 = Key::from(&[255; KEY_SIZE_BYTES]);
+        let k3 = Key::from(&[1; KEY_SIZE_BYTES]); 
+        let k4 = Key::from(&[0, 0, 1, 0]);
+        let k5 = Key::from(&[128; KEY_SIZE_BYTES]); 
+        let k6 = Key::from(&[127; KEY_SIZE_BYTES]); 
+        let k7 = Key::from(&[252; KEY_SIZE_BYTES]); 
+        let p1 = PeerInfo::new(k1.clone());
+        assert_eq!(0,  p1.bucket_of(&k1));
+        assert_eq!(31, p1.bucket_of(&k2));
+        assert_eq!(24, p1.bucket_of(&k3));
+        assert_eq!(8,  p1.bucket_of(&k4));
+        assert_eq!(31, p1.bucket_of(&k5));
+        assert_eq!(30, p1.bucket_of(&k6));
+        assert_eq!(31, p1.bucket_of(&k7));
+        let p2 = PeerInfo::new(k2.clone());
+        assert_eq!(31, p2.bucket_of(&k1));
+        assert_eq!(0,  p2.bucket_of(&k2));
+        assert_eq!(31, p2.bucket_of(&k3));
+        assert_eq!(31, p2.bucket_of(&k4));
+        assert_eq!(30, p2.bucket_of(&k5));
+        assert_eq!(31, p2.bucket_of(&k6));
+        assert_eq!(25, p2.bucket_of(&k7));
     }
 
     #[test]
     fn test_remove() {
         let mut bucket1 = KBucket::new();
-        let k1 = Key::from(&[255; 16]);
-        let k2 = Key::from(&[254; 16]);
-        let k3 = Key::from(&[253; 16]);
-        let k4 = Key::from(&[252; 16]);
-        let k5 = Key::from(&[251; 16]);
+        let k1 = Key::from(&[255; KEY_SIZE_BYTES]);
+        let k2 = Key::from(&[254; KEY_SIZE_BYTES]);
+        let k3 = Key::from(&[253; KEY_SIZE_BYTES]);
+        let k4 = Key::from(&[252; KEY_SIZE_BYTES]);
+        let k5 = Key::from(&[251; KEY_SIZE_BYTES]);
         bucket1.push_back(("127.0.0.1:8080".parse().unwrap(), k1.clone()).into());
         bucket1.push_back(("127.0.0.2:8080".parse().unwrap(), k2.clone()).into());
         bucket1.push_back(("127.0.0.3:8080".parse().unwrap(), k3.clone()).into());
@@ -561,12 +580,6 @@ mod tests {
         bucket1.push_back(("127.0.0.1:8080".parse().unwrap(), k1.clone()).into());
         assert_eq!(bucket1.remove(&k1), true);
         assert_eq!(bucket1.is_empty(), true);
-    }
-
-    #[test]
-    fn test_peer_info_length() {
-        let pi = PeerInfo::new(None);
-        assert_eq!(pi.buckets.len(), KEY_SIZE_BITS);
     }
 
 }

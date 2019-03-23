@@ -22,10 +22,11 @@ use actix_web;
 use dotenv;
 use log::{error, warn, info};
 use futures;
+use rand::{self, Rng, SeedableRng};
 
 use crate::{
     hash::hash,
-    key::{Key},
+    key::{Key, KEY_SIZE_BYTES},
     server::{create_app},
     state::{S4hState},
 };
@@ -111,9 +112,12 @@ fn command_line_shell(s4h_state: S4hState, done: Arc<AtomicBool>) {
 }
 
 
-fn create_peer(addr: SocketAddr, done: Arc<AtomicBool>, start_command_line: bool) -> S4hState {
+fn create_peer(addr: SocketAddr, done: Arc<AtomicBool>, start_command_line: bool, rng: &mut rand::rngs::StdRng) -> S4hState {
     // futures could potentially not like this solution because they want 'static, so no futures
-    let mut s4h_state = S4hState::new();
+    let mut buffer = [0u8; KEY_SIZE_BYTES];
+    rng.fill(&mut buffer);
+    let node_id = Key::from(&buffer[..]);
+    let mut s4h_state = S4hState::new(node_id);
     s4h_state.my_addr = addr;
     let s4h_state2 = s4h_state.clone();
     let s4h_state3 = s4h_state.clone();
@@ -152,7 +156,6 @@ fn main() {
     // be dangerous because in between a contains check and some get or modify,
     // the peer could be deleted.
     // TODO the CHashMap accesses have some subtle race conditions too, with contains
-    // TODO use new futures::future::join_all to run async queries simultaneouslly
     // TODO update rep statistics
 
     dotenv::dotenv().expect("dotenv");
@@ -170,7 +173,9 @@ fn main() {
     let done = Arc::new(AtomicBool::new(false));
     let done2 = Arc::clone(&done);
 
-    create_peer(listen_addr, done2, true);
+    let mut rng = rand::rngs::StdRng::seed_from_u64(789104650145782941u64);
+
+    create_peer(listen_addr, done2, true, &mut rng);
 
     while !done.load(atomic::Ordering::SeqCst) { thread::sleep(Duration::from_secs(1)); }
 }
@@ -182,6 +187,7 @@ mod tests {
     use failure::{Fail};
     use log::{debug};
 
+    /*
     fn basic_rpc_test(addr: SocketAddr, addr2: SocketAddr) -> Result<(), reqwest::Error> {
         let done = Arc::new(AtomicBool::new(false));
         let done2 = Arc::clone(&done);
@@ -395,12 +401,14 @@ mod tests {
             Ok(_) => {},
         }
     }
+    */
 
     #[test]
     fn many_peers_test() {
         dotenv::dotenv().expect("dotenv");
         let _ = env_logger::try_init();
 
+        let mut rng = rand::rngs::StdRng::seed_from_u64(789104650145782941u64);
 
         let done = Arc::new(AtomicBool::new(false));
         let mut peers = Vec::new();
@@ -409,14 +417,27 @@ mod tests {
         for port in 10245..10265 {
             let done2 = Arc::clone(&done);
             let addr = format!("127.0.0.1:{}", port).parse().expect("valid port");
-            let state = create_peer(addr, done2, false);
+            let state = create_peer(addr, done2, false, &mut rng);
             peers.push(state);
         }
 
-        // connect all peers to boostrap node
-        let bootstrap_addr = peers[0].get_my_peer().addr;
-        for peer in peers.iter().skip(1) {
-            peer.add_peer_by_addr(bootstrap_addr.clone());
+        // print node ids
+        let mut dists_to_inv = Vec::new();
+        for peer in peers.iter() {
+            let dist_to_inv = peer.get_my_peer().id.dist(&peers[0].get_my_peer().id.inverse());
+            dists_to_inv.push(dist_to_inv.clone());
+            warn!("node_id {}  dist to ~peers[0] {}", peer.get_my_peer().id, dist_to_inv);
+        }
+        warn!("peers[0] inverse {}", peers[0].get_my_peer().id.inverse());
+        dists_to_inv.sort();
+        warn!("dists_to_inv {:?}", dists_to_inv);
+
+        // connect all peers to boostrap nodes
+        let bootstrap_addr0 = peers[0].get_my_peer().addr;
+        let bootstrap_addr1 = peers[1].get_my_peer().addr;
+        for peer in peers.iter() {
+            peer.add_peer_by_addr(bootstrap_addr0.clone());
+            peer.add_peer_by_addr(bootstrap_addr1.clone());
         }
 
         // lookup ourselves to fill in kbuckets
@@ -429,17 +450,84 @@ mod tests {
         let val = "ipfs://foobar".to_string();
         peers[7].store(key.clone(), val);
 
-        for (i, peer) in peers.iter().skip(1).enumerate() {
-            let peer0_id = peers[0].get_my_peer().id;
-            peer.store_complaint_against(&peer0_id);
-            peers[0].store_complaint_against(&peer.get_my_peer().id);
-            let rep = peer.explore_trust_simple(&peer0_id);
-            info!("i {}", i);
-            if i < 4 {
-                assert_eq!(rep, 1);
-            } else {
-                assert_eq!(rep, -1);
+        let mut reputation = Vec::new();
+        let peer7_id = peers[7].get_my_peer().id;
+        for (i, peer) in peers.iter().enumerate() {
+            peer.store_complaint_against(&peer7_id);
+            peers[7].store_complaint_against(&peer.get_my_peer().id);
+            let rep = peer.explore_trust_simple(&peer7_id);
+            info!("i {} rep {}", i, rep);
+            reputation.push(rep);
+            if rep == -1 {
+                break;
             }
         }
+        warn!("{:?}", reputation);
+    }
+
+
+    #[test]
+    fn experiment2() {
+        dotenv::dotenv().expect("dotenv");
+        let _ = env_logger::try_init();
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(789104650145782941u64);
+
+        let done = Arc::new(AtomicBool::new(false));
+        let mut peers = Vec::new();
+
+        // create peers
+        for port in 10266..10286 {
+            let done2 = Arc::clone(&done);
+            let addr = format!("127.0.0.1:{}", port).parse().expect("valid port");
+            let state = create_peer(addr, done2, false, &mut rng);
+            peers.push(state);
+        }
+
+        // connect all peers to boostrap nodes
+        let bootstrap_addr0 = peers[0].get_my_peer().addr;
+        let bootstrap_addr1 = peers[1].get_my_peer().addr;
+        for peer in peers.iter() {
+            peer.add_peer_by_addr(bootstrap_addr0.clone());
+            peer.add_peer_by_addr(bootstrap_addr1.clone());
+        }
+
+        // lookup ourselves to fill in kbuckets
+        for peer in peers.iter() {
+            peer.find_self();
+        }
+
+        // store a value
+        let key = hash("Hello, Reputable World!".as_bytes());
+        let val = "ipfs://foobar".to_string();
+        peers[7].store(key.clone(), val);
+
+        // x number of peers complain about all others, to bring the average number of complaints
+        // per node up
+        for peer in peers.iter().rev().take(1) {
+            for other in peers.iter() {
+                peer.store_complaint_against(&other.get_my_peer().id);
+                other.store_complaint_against(&peer.get_my_peer().id);
+            }
+        }
+
+        let mut reputation = Vec::new();
+        let peer7_id = peers[7].get_my_peer().id;
+        for peer in peers.iter() {
+            // query complaints of other peers
+            for (i, other) in peers.iter().take(20).enumerate() {
+                error!("++++++++++++++++++++++++++ {} +++++++++++++++++++", i);
+                let _ = peer.explore_trust_simple(&other.get_my_peer().id);
+            }
+            // complain against peer 7
+            peer.store_complaint_against(&peer7_id);
+            peers[7].store_complaint_against(&peer.get_my_peer().id);
+            let rep = peer.explore_trust_simple(&peer7_id);
+            reputation.push(rep);
+            if rep == -1 {
+                break;
+            }
+        }
+        warn!("{:?}", reputation);
     }
 }

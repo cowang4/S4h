@@ -3,7 +3,11 @@ use std::collections::HashSet;
 use std::fmt::{self, Display, Formatter};
 use std::net::SocketAddr;
 use std::ops::{Deref, DerefMut};
-use std::sync::{Arc, RwLock};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+    RwLock
+};
 
 use chashmap::CHashMap;
 use log::{debug, info, warn, error};
@@ -69,6 +73,8 @@ pub struct S4hState {
     pub cr_avg: Arc<RwLock<f32>>,
     /// the average number of complaints by a node
     pub cf_avg: Arc<RwLock<f32>>,
+    /// the number of reputation queries
+    pub avg_n: Arc<AtomicUsize>,
     /// the addrs that are waiting to get verified
     unverified_addrs: Arc<RwLock<HashSet<SocketAddr>>>,
 }
@@ -95,14 +101,15 @@ pub fn validate_resp(_resp: &MessageReturned) -> bool {
 
 impl S4hState {
     
-    pub fn new() -> S4hState {
+    pub fn new(node_id: Key) -> S4hState {
         S4hState {
             map: Arc::new(CHashMap::<Key, Vec<String>>::new()),
-            peer_info: Arc::new(PeerInfo::new(None)),
+            peer_info: Arc::new(PeerInfo::new(node_id)),
             my_addr: "127.0.0.1:1234".parse().unwrap(),
             complaints: Arc::new(CHashMap::<Key, (HashSet<Key>, HashSet<Key>)>::new()),
-            cr_avg: Arc::new(RwLock::new(0.001)),
-            cf_avg: Arc::new(RwLock::new(0.001)),
+            cr_avg: Arc::new(RwLock::new(0.0)),
+            cf_avg: Arc::new(RwLock::new(0.0)),
+            avg_n: Arc::new(AtomicUsize::new(1)),
             unverified_addrs: Arc::new(RwLock::new(HashSet::new())),
         }
     }
@@ -137,6 +144,11 @@ impl S4hState {
     /// discarded.
     ///
     pub fn add_peer_by_addr<'a>(&'a self, addr: SocketAddr) {
+        // check that it isn't our addr
+        if self.my_addr == addr {
+            warn!("{}: add_peer_by_addr: tried to add our own addr",&self.my_addr);
+            return;
+        }
     
         // check that that addr isn't already in the kbuckets
         if self.peer_info.contains_addr(&addr) {
@@ -169,7 +181,7 @@ impl S4hState {
                     debug!("{}: add_peer_by_addr: added {}", &self.my_addr, &peer);
                 }
             } else {
-                warn!("ping to {} failed with error: {:?}", addr, ping_resp);
+                warn!("{}: ping to {} failed with error: {:?}", &self.my_addr, addr, ping_resp);
             }
 
             
@@ -207,6 +219,7 @@ impl S4hState {
         // will be filled with IDs of nodes that have been asked
         let mut queried = HashSet::<Key>::new();
         let mut closest_peers = Vec::<(Key, Peer)>::new(); // dist, Peer
+        let mut last_closest_peers = Vec::<(Key, Peer)>::new(); // dist, Peer
         
         // Setup initial alpha peers
         let closest_initial_peers = self.peer_info.closest_alpha_peers(key.clone());
@@ -219,7 +232,7 @@ impl S4hState {
         let mut closest_peer: Option<(Key, Peer)> = None;
 
         loop {
-            info!("Starting next iteration of node_lookup. {} queried so far.", queried.len());
+            debug!("Starting next iteration of node_lookup. {} queried so far.", queried.len());
             // gets the closest K or ALPHA (depending on the iteration) un-queried peers
             let to_query = match &closest_peer {
                 None => {
@@ -250,6 +263,7 @@ impl S4hState {
                     if !valid {
                         continue;
                     }
+                    // add the peers that we just received to next_closest_peers
                     if let Some(peers) = find_node_resp.peers {
                         for peer in peers {
                             // check that this node isn't us
@@ -260,7 +274,7 @@ impl S4hState {
                         }
                     }
                 } else {
-                    warn!("node_lookup find_node error: {:?}", &find_node_resp);
+                    error!("{}: node_lookup find_node error: {:?}", &self.my_addr, &find_node_resp);
                 }
             }
 
@@ -282,17 +296,36 @@ impl S4hState {
             // the FIND NODE to all of the k closest nodes it has
             // not already queried.
             // We will set closest_peer = None to signal to above to to_query K not ALPHA
-            if closest_peer.clone().expect("a peer").1.id == closest_peers.get(0).expect("another peer").1.id {
+            let mut found_closer = false;
+            if last_closest_peers.iter().take(K).len() != closest_peers.iter().take(K).len() {
+                found_closer = true;
+            }
+            for (p1, p2) in last_closest_peers.iter().take(K).zip(closest_peers.iter().take(K)) {
+                if p1.1.id != p2.1.id {
+                    found_closer = true;
+                }
+            }
+            last_closest_peers = closest_peers.clone();
+            if !found_closer {
                 closest_peer = None;
             }
         }
 
-        info!("{}: Finished node lookup of {}", &self.my_addr, &key);
-
         closest_peers.truncate(K);
+        info!("{}: Finished node lookup of {}, found {:?}", &self.my_addr, &key, &closest_peers);
         closest_peers.iter().map(|p| p.1.clone()).collect()
     }
 
+
+    fn node_lookup_exact(&self, node_id: Key) -> Option<Peer> {
+        let peers = self.node_lookup(node_id.clone());
+        for peer in peers {
+            if peer.id == node_id {
+                return Some(peer.clone());
+            }
+        }
+        return None;
+    }
 
     /// Lookup our own node_id to fill in our kbuckets
     pub fn find_self(&self) {
@@ -341,10 +374,18 @@ impl S4hState {
     /// Looks up the closest peers to against in the DHT and then sends them a store_complaint_against
     pub fn store_complaint_against(&self, against: &Key) {
         info!("{}: Starting store_complaint_against against {}.", &self.my_addr, against);
-        let against_peer = self.peer_info.get(against);
-        if against_peer.is_none() {
-            error!("Peer not known with key: {}", against);
+        if against == &self.get_my_peer().id {
+            error!("Cannot complain against ourselves!");
             return;
+        }
+        let mut against_peer = self.peer_info.get(against);
+        if against_peer.is_none() {
+            let looked_up_peer = self.node_lookup_exact(against.clone());
+            if looked_up_peer.is_none() {
+                error!("Peer not known with key: {}", against);
+                return;
+            }
+            against_peer = looked_up_peer;
         }
         let against_peer = against_peer.unwrap();
         let inverse_by = against.inverse();
@@ -379,12 +420,13 @@ impl S4hState {
     /// Names from Aberer paper
     fn get_complaints(&self, q: Key) -> HashSet<WitnessReport> {
         let mut res = HashSet::new();
-        let closest_peers_in_dht: Vec<Peer> = self.node_lookup(q.clone());
+        let closest_peers_in_dht: Vec<Peer> = self.node_lookup(q.inverse());
         let closest_peers_in_dht_len = closest_peers_in_dht.len();
         for peer in closest_peers_in_dht {
             let query_res = client::query_complaints(peer.addr, self.get_my_peer(), q.clone());
             if let Ok(query_res) = query_res {
                 if let Some(data) = query_res.complaints {
+                    debug!("peer {} returned complaints {:?}", peer.id.clone(), &data);
                     let witness_report = WitnessReport::from_complaint_data(peer.id.clone(), data);
                     res.insert(witness_report);
                 }
@@ -403,8 +445,8 @@ impl S4hState {
         let cr_avg = self.cr_avg.read().unwrap();
         let cf_avg = self.cf_avg.read().unwrap();
         let sqr_term = (0.5 + (4.0 / (*cr_avg * *cf_avg).sqrt())).powi(2);
-        debug!("sqr_term: {}  cr: {}  cf: {}", &sqr_term, cr, cf);
-        debug!("score: {}    threshold: {}", cr as f32 * cf as f32, sqr_term * *cr_avg * *cf_avg);
+        warn!("sqr_term: {}  cr: {}  cf: {}", &sqr_term, cr, cf);
+        warn!("score: {}    threshold: {}", cr as f32 * cf as f32, sqr_term * *cr_avg * *cf_avg);
         if cr as f32 * cf as f32 <= sqr_term * *cr_avg * *cf_avg {
             1
         } else {
@@ -416,7 +458,13 @@ impl S4hState {
     pub fn explore_trust_simple(&self, q: &Key) -> isize {
         let w = self.get_complaints(q.clone());
 
-        // TODO update average statistics with W
+        // update average statistics with W
+        if w.len() > 0 {
+            let cr: usize = w.iter().map(|wr| wr.cr).sum::<usize>() / w.len();
+            let cf: usize = w.iter().map(|wr| wr.cf).sum::<usize>() / w.len();
+            warn!("explore_trust_simple  cr {}  cf {}", cr, cf);
+            self.update_statistics(cr, cf);
+        }
         
         let s: isize = w.iter().map(|wr| self.decide_reputation(wr.cr, wr.cf)).sum();
 
@@ -425,6 +473,15 @@ impl S4hState {
             x if x < 0  => -1,
             _           => 0,
         }
+    }
+
+    fn update_statistics(&self, cr: usize, cf: usize) {
+        let mut cr_avg = self.cr_avg.write().unwrap();
+        let mut cf_avg = self.cf_avg.write().unwrap();
+        let avg_n = self.avg_n.load(Ordering::SeqCst) as f32;
+        *cr_avg = ((avg_n * *cr_avg) + cr as f32) as f32 / (avg_n+1.0);
+        *cf_avg = ((avg_n * *cf_avg) + cf as f32) as f32 / (avg_n+1.0);
+        let _ = self.avg_n.fetch_add(1, Ordering::SeqCst);
     }
 
     #[allow(dead_code)]
