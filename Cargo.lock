@@ -59,9 +59,9 @@ dependencies = [
 
 [[package]]
 name = "actix-web"
-version = "0.7.18"
+version = "0.7.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f33c941e5e69a58a6bfef33853228042ed3799fc4b5a4923a36a85776fb690"
+checksum = "b0ac60f86c65a50b140139f499f4f7c6e49e4b5d88fbfba08e4e3975991f7bf4"
 dependencies = [
  "actix",
  "actix-net",
@@ -116,9 +116,9 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4300e9431455322ae393d43a2ba1ef96b8080573c0fc23b196219efedfb6ba69"
 dependencies = [
- "proc-macro2",
- "quote",
- "syn",
+ "proc-macro2 0.4.24",
+ "quote 0.6.10",
+ "syn 0.15.26",
 ]
 
 [[package]]
@@ -525,9 +525,9 @@ version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea1063915fd7ef4309e222a5a07cf9c319fb9c7836b1f89b85458672dbb127e1"
 dependencies = [
- "proc-macro2",
- "quote",
- "syn",
+ "proc-macro2 0.4.24",
+ "quote 0.6.10",
+ "syn 0.15.26",
  "synstructure",
 ]
 
@@ -1082,6 +1082,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "proc-macro2"
+version = "1.0.39"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c54b25569025b7fc9651de43004ae593a75ad88543b17178aa5e1b9c4f15f56f"
+dependencies = [
+ "unicode-ident",
+]
+
+[[package]]
 name = "quick-error"
 version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1093,7 +1102,16 @@ version = "0.6.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "53fa22a1994bd0f9372d7a816207d8a2677ad0325b073f5c5332760f0fb62b5c"
 dependencies = [
- "proc-macro2",
+ "proc-macro2 0.4.24",
+]
+
+[[package]]
+name = "quote"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1feb54ed693b93a84e14094943b84b7c4eae204c512b7ccb95ab0c66d278ad1"
+dependencies = [
+ "proc-macro2 1.0.39",
 ]
 
 [[package]]
@@ -1394,9 +1412,9 @@ version = "1.0.84"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4d6115a3ca25c224e409185325afc16a0d5aaaabc15c42b09587d6f1ba39a5b"
 dependencies = [
- "proc-macro2",
- "quote",
- "syn",
+ "proc-macro2 0.4.24",
+ "quote 0.6.10",
+ "syn 0.15.26",
 ]
 
 [[package]]
@@ -1489,9 +1507,20 @@ version = "0.15.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f92e629aa1d9c827b2bb8297046c1ccffc57c99b947a680d3ccff1f136a3bee9"
 dependencies = [
- "proc-macro2",
- "quote",
+ "proc-macro2 0.4.24",
+ "quote 0.6.10",
  "unicode-xid",
+]
+
+[[package]]
+name = "syn"
+version = "1.0.96"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0748dd251e24453cb8717f0354206b91557e4ec8703673a4b30208f2abaf1ebf"
+dependencies = [
+ "proc-macro2 1.0.39",
+ "quote 1.0.18",
+ "unicode-ident",
 ]
 
 [[package]]
@@ -1500,9 +1529,9 @@ version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73687139bf99285483c96ac0add482c3776528beac1d97d444f6e91f203a2015"
 dependencies = [
- "proc-macro2",
- "quote",
- "syn",
+ "proc-macro2 0.4.24",
+ "quote 0.6.10",
+ "syn 0.15.26",
  "unicode-xid",
 ]
 
@@ -1870,6 +1899,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "unicode-ident"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5bd2fe26506023ed7b5e1e315add59d6f584c621d037f9368fea9cfb988f368c"
+
+[[package]]
 name = "unicode-normalization"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1916,35 +1951,33 @@ dependencies = [
 
 [[package]]
 name = "v_escape"
-version = "0.3.2"
+version = "0.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8b50688edb86f4c092a1a9fe8bda004b0faa3197100897653809e97e09a2814"
+checksum = "660b101c07b5d0863deb9e7fb3138777e858d6d2a79f9e6049a27d1cc77c6da6"
 dependencies = [
  "v_escape_derive",
- "version_check",
 ]
 
 [[package]]
 name = "v_escape_derive"
-version = "0.2.1"
+version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7cd994c63b487fef7aad31e5394ec04b9e24de7b32ea5251c9fb499cd2cbf44c"
+checksum = "c2ca2a14bc3fc5b64d188b087a7d3a927df87b152e941ccfbc66672e20c467ae"
 dependencies = [
  "nom",
- "proc-macro2",
- "quote",
- "syn",
+ "proc-macro2 1.0.39",
+ "quote 1.0.18",
+ "syn 1.0.96",
 ]
 
 [[package]]
 name = "v_htmlescape"
-version = "0.3.2"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "020cae817dc82693aa523f01087b291b1c7a9ac8cea5c12297963f21769fb27f"
+checksum = "e33e939c0d8cf047514fb6ba7d5aac78bc56677a6938b2ee67000b91f2e97e41"
 dependencies = [
  "cfg-if",
  "v_escape",
- "version_check",
 ]
 
 [[package]]
