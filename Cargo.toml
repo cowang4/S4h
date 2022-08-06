@@ -7,7 +7,7 @@ edition = "2018"
 [dependencies]
 actix = "0.7"
 actix-web = "0.7"
-blake2b_simd = "0.4"
+blake2b_simd = "1.0"
 bytes = { version = "0.4", features = ["serde"]}
 chashmap = "2.2"
 dotenv = "0.15"
