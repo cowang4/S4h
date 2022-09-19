@@ -11,7 +11,7 @@ blake2b_simd = "1.0"
 bytes = { version = "0.4", features = ["serde"]}
 chashmap = "2.2"
 dotenv = "0.15"
-env_logger = "0.5"
+env_logger = "0.9"
 failure = "0.1"
 futures = "0.1"
 hex = "0.4"
