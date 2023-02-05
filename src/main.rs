@@ -184,7 +184,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use failure::{Fail};
     use log::{debug};
 
     /*
