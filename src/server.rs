@@ -33,7 +33,7 @@ pub struct PingArgs {
 }
 
 /// Respond if this peer is alive
-pub fn ping((req, args): (HttpRequest<S4hState>, Json<PingArgs>)) -> Json<MessageReturned> {
+pub fn ping((req, args): (HttpRequest, Json<PingArgs>)) -> Json<MessageReturned> {
     let state = req.state();
     info!("{}: Received a ping request from {}", &state.my_addr, &args.from);
     let response = MessageReturned::from_peer(state.get_my_peer());
@@ -59,7 +59,7 @@ pub struct StoreArgs {
 
 /// Store this pair in the HashTable
 /// pair: (Key, URL)
-pub fn store((req, args): (HttpRequest<S4hState>, Json<StoreArgs>)) -> Json<MessageReturned> {
+pub fn store((req, args): (HttpRequest, Json<StoreArgs>)) -> Json<MessageReturned> {
     let state = req.state();
     info!("{}: Received a store request from {}", &state.my_addr, &args.from);
     let mut response = MessageReturned::from_peer(state.get_my_peer());
@@ -106,7 +106,7 @@ pub struct FindNodeArgs {
 
 /// Find a node by it's ID
 /// Iterative, so just returns a list of closer peers.
-pub fn find_node((req, args): (HttpRequest<S4hState>, Json<FindNodeArgs>)) -> Json<MessageReturned> {
+pub fn find_node((req, args): (HttpRequest, Json<FindNodeArgs>)) -> Json<MessageReturned> {
     let state = req.state();
     info!("{}: Received a find node request from {} for node_id: {}", &state.my_addr, &args.from, &args.node_id);
     let mut response = MessageReturned::from_peer(state.get_my_peer());
@@ -136,7 +136,7 @@ pub struct FindValueArgs {
 }
 
 /// Find a value by it's key
-fn find_value((req, args): (HttpRequest<S4hState>, Json<FindValueArgs>)) -> Json<MessageReturned> {
+fn find_value((req, args): (HttpRequest, Json<FindValueArgs>)) -> Json<MessageReturned> {
     let state = req.state();
     info!("{}: Received a find value request from {} for key: {}", &state.my_addr, &args.from, &args.key);
     let mut response = MessageReturned::from_peer(state.get_my_peer());
@@ -177,7 +177,7 @@ pub struct QueryComplaintsArgs {
     pub sig: (),
 }
 
-pub fn query_complaints((req, args): (HttpRequest<S4hState>, Json<QueryComplaintsArgs>)) -> Json<MessageReturned> {
+pub fn query_complaints((req, args): (HttpRequest, Json<QueryComplaintsArgs>)) -> Json<MessageReturned> {
     let state = req.state();
     info!("{}: Received a query_complaints request from {} for node_id: {}", &state.my_addr, &args.from, &args.key);
 
@@ -210,7 +210,7 @@ pub struct StoreComplaintAgainstArgs {
 }
 
 /// should be called at a node close to the inverse of against.id
-pub fn store_complaint_against((req, args): (HttpRequest<S4hState>, Json<StoreComplaintAgainstArgs>)) -> Json<MessageReturned> {
+pub fn store_complaint_against((req, args): (HttpRequest, Json<StoreComplaintAgainstArgs>)) -> Json<MessageReturned> {
     let state = req.state();
     info!("{}: Received a store_complaint_against request from {} against node_id: {}", &state.my_addr, &args.from, &args.against.id);
 
@@ -264,7 +264,7 @@ pub struct StoreComplaintByArgs {
     pub sig: (),
 }
 
-pub fn store_complaint_by((req, args): (HttpRequest<S4hState>, Json<StoreComplaintByArgs>)) -> Json<MessageReturned> {
+pub fn store_complaint_by((req, args): (HttpRequest, Json<StoreComplaintByArgs>)) -> Json<MessageReturned> {
     let state = req.state();
     info!("{}: Received a store_complaint_by request from {}, by: {}, against node_id: {}", &state.my_addr, &args.from, &args.by.id, &args.against.id);
     // should be called at a node close to the inverse of by.id
